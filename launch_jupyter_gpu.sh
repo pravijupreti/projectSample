@@ -40,36 +40,29 @@ install_nvidia_toolkit() {
     sleep 5
 }
 
-# Function to open browser and capture its PID
+# Function to open browser
 open_browser() {
     local url=$1
     echo "Opening browser at $url"
     
-    # Detect OS and open browser accordingly, capturing PID
+    # Detect OS and open browser accordingly
     case "$(uname -s)" in
         Linux)
             if command -v xdg-open >/dev/null 2>&1; then
                 xdg-open "$url" >/dev/null 2>&1 &
-                browser_pid=$!
-                echo $browser_pid > /tmp/jupyter_browser.pid
-                echo "Browser PID: $browser_pid"
             elif command -v gnome-open >/dev/null 2>&1; then
                 gnome-open "$url" >/dev/null 2>&1 &
-                echo $! > /tmp/jupyter_browser.pid
             elif command -v kde-open >/dev/null 2>&1; then
                 kde-open "$url" >/dev/null 2>&1 &
-                echo $! > /tmp/jupyter_browser.pid
             else
                 echo "⚠️  Could not detect browser launcher. Please open $url manually."
             fi
             ;;
         Darwin)  # macOS
             open "$url" >/dev/null 2>&1 &
-            echo $! > /tmp/jupyter_browser.pid
             ;;
         CYGWIN*|MINGW*|MSYS*)  # Windows
             start "$url" >/dev/null 2>&1 &
-            echo $! > /tmp/jupyter_browser.pid
             ;;
         *)
             echo "⚠️  Unsupported OS for auto-launch. Please open $url manually."
@@ -98,41 +91,105 @@ wait_for_jupyter() {
     return 1
 }
 
-# Function to monitor browser and trigger git push
-monitor_browser() {
-    local container_name=$1
+# Function to get kernel count safely
+get_kernel_count() {
+    local port=$1
+    local count=0
     
-    if [ ! -f /tmp/jupyter_browser.pid ]; then
-        echo "⚠️  Browser PID not found. Skipping monitoring."
-        return
+    # Try to get kernels via API
+    local response=$(curl -s http://localhost:$port/api/kernels 2>/dev/null)
+    if [ -n "$response" ] && [ "$response" != "null" ]; then
+        # Count the number of kernel objects
+        count=$(echo "$response" | grep -o '"id"' | wc -l | tr -d ' ')
     fi
     
-    browser_pid=$(cat /tmp/jupyter_browser.pid)
-    echo "🖥️  Monitoring browser (PID: $browser_pid)..."
-    echo "   Close the browser tab/window to trigger git backup"
+    echo "$count"
+}
+
+# Function to get session count safely
+get_session_count() {
+    local port=$1
+    local count=0
     
-    # Monitor browser process
-    while kill -0 $browser_pid 2>/dev/null; do
+    # Try to get sessions via API
+    local response=$(curl -s http://localhost:$port/api/sessions 2>/dev/null)
+    if [ -n "$response" ] && [ "$response" != "null" ]; then
+        # Count the number of session objects
+        count=$(echo "$response" | grep -o '"id"' | wc -l | tr -d ' ')
+    fi
+    
+    echo "$count"
+}
+
+# Function to monitor Jupyter kernel activity
+monitor_jupyter_kernel() {
+    local container_name=$1
+    local port=$2
+    
+    echo "🖥️  Monitoring Jupyter kernel activity..."
+    echo "   The git backup will trigger when you shut down all kernels"
+    echo "   (To shut down kernels: File → Shut Down, or click 'Shutdown' in kernel menu)"
+    echo ""
+    
+    local last_kernel_count=0
+    local last_session_count=0
+    local idle_time=0
+    local max_idle=5  # Wait 5 seconds after kernels close before triggering
+    local first_run=true
+    
+    while true; do
+        # Get current counts safely
+        kernel_count=$(get_kernel_count $port)
+        session_count=$(get_session_count $port)
+        
+        # Clean the counts (remove any whitespace/newlines)
+        kernel_count=$(echo "$kernel_count" | tr -d '\n\r')
+        session_count=$(echo "$session_count" | tr -d '\n\r')
+        
+        # Ensure they're numbers
+        if ! [[ "$kernel_count" =~ ^[0-9]+$ ]]; then
+            kernel_count=0
+        fi
+        if ! [[ "$session_count" =~ ^[0-9]+$ ]]; then
+            session_count=0
+        fi
+        
+        # Show status on changes or periodically
+        if [ "$kernel_count" -ne "$last_kernel_count" ] || [ "$session_count" -ne "$last_session_count" ] || [ $first_run = true ]; then
+            if [ "$kernel_count" -gt 0 ] || [ "$session_count" -gt 0 ]; then
+                echo "📊 $kernel_count active kernel(s), $session_count session(s) running..."
+            fi
+            last_kernel_count=$kernel_count
+            last_session_count=$session_count
+            first_run=false
+        fi
+        
+        # If no kernels/sessions active, start idle timer
+        if [ "$kernel_count" -eq 0 ] && [ "$session_count" -eq 0 ]; then
+            idle_time=$((idle_time + 2))
+            if [ $idle_time -ge $max_idle ]; then
+                echo ""
+                echo "🔍 No active kernels for $max_idle seconds. Triggering git backup..."
+                
+                # Small delay to ensure any final saves are complete
+                sleep 2
+                
+                # Call the git push script
+                if [ -f "./git_auto_push.sh" ]; then
+                    chmod +x ./git_auto_push.sh
+                    ./git_auto_push.sh "$container_name" "kernel_closed"
+                else
+                    echo "❌ git_auto_push.sh not found! Please create it."
+                fi
+                break
+            fi
+        else
+            # Reset idle timer if kernels are active
+            idle_time=0
+        fi
+        
         sleep 2
     done
-    
-    echo ""
-    echo "🔍 Browser closed! Triggering git backup..."
-    
-    # Small delay to ensure any final saves are complete
-    sleep 3
-    
-    # Call the git push script
-    if [ -f "./git_auto_push.sh" ]; then
-        chmod +x ./git_auto_push.sh
-        # Pass both container name and a flag indicating browser closed
-        ./git_auto_push.sh "$container_name" "browser_closed"
-    else
-        echo "❌ git_auto_push.sh not found! Please create it."
-    fi
-    
-    # Clean up
-    rm -f /tmp/jupyter_browser.pid
 }
 
 # Check for NVIDIA GPU
@@ -200,8 +257,8 @@ if command -v nvidia-smi >/dev/null 2>&1; then
         echo ""
         echo "If you see GPU devices listed, everything is working correctly!"
         
-        # Monitor browser and trigger git backup when closed
-        monitor_browser "$CONTAINER_NAME"
+        # Monitor Jupyter kernel and trigger git backup when kernels are closed
+        monitor_jupyter_kernel "$CONTAINER_NAME" "$PORT"
         
     else
         echo "Failed to configure NVIDIA runtime. Checking Docker runtime configuration..."
@@ -250,8 +307,8 @@ else
     echo "Container logs:"
     $DOCKER_CMD logs $CONTAINER_NAME --tail 10
     
-    # Monitor browser and trigger git backup when closed
-    monitor_browser "$CONTAINER_NAME"
+    # Monitor Jupyter kernel and trigger git backup when kernels are closed
+    monitor_jupyter_kernel "$CONTAINER_NAME" "$PORT"
 fi
 
 echo ""

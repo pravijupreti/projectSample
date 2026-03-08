@@ -1,6 +1,6 @@
 #!/bin/bash
 # git_auto_push.sh - Git versioning and auto-push for Jupyter notebooks
-# This script is called by launch_jupyter_gpu.sh when browser closes
+# This script is called by launch_jupyter_gpu.sh when kernels are closed
 
 set -e
 
@@ -22,7 +22,7 @@ NC='\033[0m' # No Color
 # Get container name from argument
 if [ $# -eq 0 ]; then
     echo -e "${RED}❌ Error: Container name not provided${NC}"
-    echo "Usage: $0 <container_name> [browser_closed]"
+    echo "Usage: $0 <container_name> [kernel_closed]"
     exit 1
 fi
 
@@ -30,9 +30,9 @@ CONTAINER_NAME="$1"
 TRIGGER_REASON="${2:-}"  # Second argument indicates why script was called
 DOCKER_CMD="sudo docker"
 
-# Only proceed if triggered by browser close
-if [ "$TRIGGER_REASON" != "browser_closed" ]; then
-    echo -e "${YELLOW}⚠️  This script should only be called when browser closes.${NC}"
+# IMPORTANT: Only proceed if triggered by kernel close
+if [ "$TRIGGER_REASON" != "kernel_closed" ]; then
+    echo -e "${YELLOW}⚠️  This script should only be called when Jupyter kernels are closed.${NC}"
     echo "Exiting..."
     exit 0
 fi
@@ -42,7 +42,7 @@ echo -e "${GREEN}📦 Git Auto-Push for Jupyter Notebooks${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo "Container: $CONTAINER_NAME"
 echo "Workspace: $WORKSPACE_PATH"
-echo "Trigger: Browser closed - backing up your work..."
+echo "Trigger: Jupyter kernels closed - backing up your work..."
 echo ""
 
 # ==================== CONFIGURATION MANAGEMENT ====================
@@ -180,7 +180,7 @@ setup_branch() {
     fi
 }
 
-# Function to commit and push changes (simplified - no kernel waiting)
+# Function to commit and push changes
 commit_and_push() {
     echo -e "${YELLOW}Checking for changes...${NC}"
     
@@ -256,7 +256,7 @@ main() {
     # Setup branch
     setup_branch
     
-    # Commit and push changes (no kernel waiting)
+    # Commit and push changes
     commit_and_push
     
     # Show final status

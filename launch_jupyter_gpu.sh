@@ -162,7 +162,7 @@ monitor_browser_window() {
     # Call the git push script
     if [ -f "./git_auto_push.sh" ]; then
         chmod +x ./git_auto_push.sh
-        ./git_auto_push.sh "$container_name" "window_closed"
+        ./git_auto_push.sh "window_closed"
     else
         echo "❌ git_auto_push.sh not found! Please create it."
     fi

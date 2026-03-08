@@ -1,13 +1,13 @@
 #!/bin/bash
-# git_auto_push.sh - Git versioning and auto-push for Jupyter notebooks (HTTP version with credentials)
+# git_auto_push.sh - Git versioning and auto-push for Jupyter notebooks
+# RUNS ON HOST MACHINE - NOT IN CONTAINER!
 
 set -e
 
 # ==================== CONFIGURATION ====================
 CONFIG_FILE="$HOME/.jupyter_git_config"
-CREDENTIALS_FILE="$HOME/.git-credentials"
 DEFAULT_BRANCH="main"
-WORKSPACE_PATH="/tf/notebooks"
+WORKSPACE_PATH="$(pwd)"  # Current directory on host
 # ========================================================
 
 # Colors for output
@@ -19,16 +19,13 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Get container name from argument
+# Get trigger reason from argument (container name no longer needed)
 if [ $# -eq 0 ]; then
-    echo -e "${RED}❌ Error: Container name not provided${NC}"
-    echo "Usage: $0 <container_name> [window_closed|manual]"
-    exit 1
+    echo -e "${YELLOW}⚠️  No trigger reason provided, assuming manual trigger${NC}"
+    TRIGGER_REASON="manual"
+else
+    TRIGGER_REASON="$1"
 fi
-
-CONTAINER_NAME="$1"
-TRIGGER_REASON="${2:-}"
-DOCKER_CMD="sudo docker"
 
 # Only proceed if triggered by window close or manual
 if [ "$TRIGGER_REASON" != "window_closed" ] && [ "$TRIGGER_REASON" != "manual" ]; then
@@ -40,35 +37,70 @@ fi
 echo -e "${BLUE}========================================${NC}"
 echo -e "${GREEN}📦 Git Auto-Push for Jupyter Notebooks${NC}"
 echo -e "${BLUE}========================================${NC}"
-echo "Container: $CONTAINER_NAME"
-echo "Workspace: $WORKSPACE_PATH"
-echo "Trigger: Browser window closed - backing up your work..."
+echo "Workspace: $WORKSPACE_PATH (on host)"
+echo "Trigger: $TRIGGER_REASON - backing up your work..."
 echo ""
 
-# ==================== CREDENTIALS MANAGEMENT ====================
+# ==================== FIX PERMISSIONS AND LOCKS ====================
 
-# Function to setup git credentials (only once)
-setup_git_credentials() {
-    if [ ! -f "$CREDENTIALS_FILE" ]; then
-        echo -e "${YELLOW}🔑 First-time git credentials setup...${NC}"
-        echo "================================================"
-        echo "Please enter your GitHub credentials for HTTP authentication."
-        echo "These will be stored securely in $CREDENTIALS_FILE"
-        echo "================================================"
-        echo ""
+# Function to fix Git safe.directory issue
+fix_safe_directory() {
+    local dir="$1"
+    
+    # Check if we need to add this directory to safe.directory
+    if ! git config --global --get-all safe.directory 2>/dev/null | grep -q "^$dir$"; then
+        echo "Adding $dir to Git safe.directory..."
+        git config --global --add safe.directory "$dir"
+        echo -e "${GREEN}✅ Directory added to safe list${NC}"
+    fi
+}
+
+# Function to handle git lock files and permissions
+fix_git_permissions() {
+    local git_dir="$WORKSPACE_PATH/.git"
+    
+    # Check if .git directory exists
+    if [ -d "$git_dir" ]; then
+        echo "Checking git permissions..."
         
-        read -p "Enter your GitHub username: " GITHUB_USERNAME
-        read -sp "Enter your GitHub password (or token): " GITHUB_PASSWORD
-        echo ""
+        # Fix ownership of .git directory (run with sudo if needed)
+        if [ "$(stat -c '%U' "$git_dir")" != "$USER" ]; then
+            echo "Fixing .git directory ownership..."
+            sudo chown -R "$USER":"$USER" "$git_dir" 2>/dev/null || true
+        fi
         
-        # Save credentials securely
-        echo "https://$GITHUB_USERNAME:$GITHUB_PASSWORD@github.com" > "$CREDENTIALS_FILE"
-        chmod 600 "$CREDENTIALS_FILE"
+        # Remove stale lock files
+        local lock_files=(
+            "$git_dir/index.lock"
+            "$git_dir/HEAD.lock"
+            "$git_dir/refs/heads/*.lock"
+            "$git_dir/refs/tags/*.lock"
+            "$git_dir/refs/remotes/*/*.lock"
+        )
         
-        echo -e "${GREEN}✅ Credentials saved securely${NC}"
-        echo ""
-    else
-        echo -e "${GREEN}✅ Using saved credentials${NC}"
+        for lock_pattern in "${lock_files[@]}"; do
+            # Use find to handle wildcards safely
+            find "$git_dir" -path "$lock_pattern" -type f 2>/dev/null | while read -r lock_file; do
+                # Check if the lock file is stale (older than 5 minutes)
+                if [ -f "$lock_file" ]; then
+                    lock_age=$(( $(date +%s) - $(stat -c %Y "$lock_file") ))
+                    if [ $lock_age -gt 300 ]; then  # 5 minutes = 300 seconds
+                        echo "Removing stale lock file: $lock_file"
+                        rm -f "$lock_file"
+                    else
+                        # Check if any git process is actually running
+                        if ! pgrep -f "git.*$WORKSPACE_PATH" > /dev/null; then
+                            echo "No git process found. Removing stale lock file: $lock_file"
+                            rm -f "$lock_file"
+                        fi
+                    fi
+                fi
+            done
+        done
+        
+        # Fix permissions on all git files
+        find "$git_dir" -type f -exec chmod 644 {} \; 2>/dev/null || true
+        find "$git_dir" -type d -exec chmod 755 {} \; 2>/dev/null || true
     fi
 }
 
@@ -88,10 +120,7 @@ load_config() {
         echo -e "${CYAN}📊 First Time GitHub Repository Setup${NC}"
         echo -e "${PURPLE}========================================${NC}"
         
-        # Setup credentials first
-        setup_git_credentials
-        
-        read -p "Enter GitHub repository URL (HTTPS only): " GITHUB_REPO
+        read -p "Enter GitHub repository URL: " GITHUB_REPO
         read -p "Enter branch name (default: $DEFAULT_BRANCH): " new_branch
         CURRENT_BRANCH="${new_branch:-$DEFAULT_BRANCH}"
         
@@ -107,78 +136,17 @@ EOF
     fi
 }
 
-# ==================== GIT OPERATIONS ====================
+# ==================== GIT OPERATIONS ON HOST ====================
 
-# Function to fix directory ownership
-fix_directory_ownership() {
-    $DOCKER_CMD exec $CONTAINER_NAME git config --global --add safe.directory $WORKSPACE_PATH 2>/dev/null || true
-}
-
-# Function to setup git in container with credentials
-setup_container_git() {
-    echo "Setting up git in container with credentials..."
-    
-    # Read credentials
-    if [ -f "$CREDENTIALS_FILE" ]; then
-        CREDENTIALS=$(cat "$CREDENTIALS_FILE")
-        
-        # Extract username and password from credentials file
-        if [[ "$CREDENTIALS" =~ https://([^:]+):([^@]+)@github\.com ]]; then
-            GITHUB_USERNAME="${BASH_REMATCH[1]}"
-            GITHUB_PASSWORD="${BASH_REMATCH[2]}"
-            
-            # Configure git in container to use these credentials
-            $DOCKER_CMD exec $CONTAINER_NAME git config --global user.name "$GITHUB_USERNAME"
-            
-            # Set up credential helper in container
-            $DOCKER_CMD exec $CONTAINER_NAME git config --global credential.helper store
-            
-            # Create .git-credentials file in container
-            $DOCKER_CMD exec $CONTAINER_NAME sh -c "mkdir -p /root && echo '$CREDENTIALS' > /root/.git-credentials"
-            $DOCKER_CMD exec $CONTAINER_NAME chmod 600 /root/.git-credentials
-            
-            echo -e "${GREEN}✅ Git credentials configured in container${NC}"
-        fi
-    fi
-}
-
-# Function to initialize git in the container if needed
-init_git() {
-    echo -e "${YELLOW}Checking git configuration...${NC}"
-    
-    # Check if git is installed in container
-    if ! $DOCKER_CMD exec $CONTAINER_NAME which git >/dev/null 2>&1; then
-        echo "Installing git in container..."
-        $DOCKER_CMD exec $CONTAINER_NAME apt-get update
-        $DOCKER_CMD exec $CONTAINER_NAME apt-get install -y git
-    fi
-    
-    # Fix directory ownership
-    fix_directory_ownership
-    
-    # Setup git with credentials
-    setup_container_git
-    
-    # Get system username and email (from host) as fallback
-    HOST_USER=$(whoami)
-    HOST_EMAIL="$HOST_USER@$(hostname)"
-    
-    # Configure git user in container (if not already set)
-    $DOCKER_CMD exec $CONTAINER_NAME git config --global user.name "$HOST_USER" 2>/dev/null || true
-    $DOCKER_CMD exec $CONTAINER_NAME git config --global user.email "$HOST_EMAIL" 2>/dev/null || true
-    
-    echo -e "${GREEN}✅ Git configured with: $HOST_USER <$HOST_EMAIL>${NC}"
-    
-    # Check if git repo exists in workspace
-    if ! $DOCKER_CMD exec $CONTAINER_NAME test -d "$WORKSPACE_PATH/.git"; then
-        echo "Initializing git repository in workspace..."
-        $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git init
-        
-        # Set default branch
-        $DOCKER_CMD exec $CONTAINER_NAME git config --global init.defaultBranch "$DEFAULT_BRANCH"
+# Function to check if git repo exists on host
+check_git_repo() {
+    if [ ! -d ".git" ]; then
+        echo "Initializing git repository on host..."
+        git init
+        git checkout -b "$CURRENT_BRANCH" 2>/dev/null || git checkout -b main
         
         # Create .gitignore
-        $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME bash -c "cat > .gitignore << 'EOF'
+        cat > .gitignore << 'EOF'
 .ipynb_checkpoints/
 */.ipynb_checkpoints/*
 __pycache__/
@@ -187,109 +155,89 @@ __pycache__/
 .env
 *.log
 *.tmp
-EOF"
+EOF
         
-        # Initial commit
-        $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git add .
-        $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git commit -m "Initial commit from Jupyter container"
-        echo -e "${GREEN}✅ Git repository initialized${NC}"
+        git add .
+        git commit -m "Initial commit from Jupyter workspace" || true
+        echo -e "${GREEN}✅ Git repository initialized on host${NC}"
     fi
 }
 
-# Function to setup remote
+# Function to setup remote on host
 setup_remote() {
     if [ -n "$GITHUB_REPO" ]; then
-        echo "Setting remote URL to: $GITHUB_REPO"
-        
-        if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote | grep -q origin; then
-            echo "Updating existing remote origin..."
-            $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote set-url origin "$GITHUB_REPO"
-        else
-            echo "Adding remote origin..."
-            $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote add origin "$GITHUB_REPO"
-        fi
-        
-        # Verify the remote URL was set correctly
-        echo "Verifying remote URL after update:"
-        $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote -v
-    fi
-}
-
-# Function to handle branch
-setup_branch() {
-    if [ -z "$CURRENT_BRANCH" ]; then
-        CURRENT_BRANCH="$DEFAULT_BRANCH"
-    fi
-    
-    # Get current branch
-    current_branch=$($DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "none")
-    
-    if [ "$current_branch" != "$CURRENT_BRANCH" ]; then
-        echo "Setting up branch: $CURRENT_BRANCH"
-        
-        # Check if branch exists locally
-        if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git show-ref --verify --quiet refs/heads/"$CURRENT_BRANCH"; then
-            $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git checkout "$CURRENT_BRANCH"
-        else
-            # Check if branch exists remotely
-            if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git ls-remote --heads origin "$CURRENT_BRANCH" 2>/dev/null | grep -q "$CURRENT_BRANCH"; then
-                $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git checkout -b "$CURRENT_BRANCH" origin/"$CURRENT_BRANCH"
-            else
-                # Create new branch
-                $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git checkout -b "$CURRENT_BRANCH"
+        # Check if remote exists
+        if git remote | grep -q origin; then
+            current_remote=$(git remote get-url origin 2>/dev/null)
+            if [ "$current_remote" != "$GITHUB_REPO" ]; then
+                echo "Updating remote URL..."
+                git remote set-url origin "$GITHUB_REPO"
             fi
+        else
+            echo "Adding remote origin: $GITHUB_REPO"
+            git remote add origin "$GITHUB_REPO"
         fi
-        echo -e "${GREEN}✅ Switched to branch: $CURRENT_BRANCH${NC}"
     fi
 }
 
-# Function to commit and push changes
+# Function to commit and push changes from HOST
 commit_and_push() {
-    echo -e "${YELLOW}Checking for changes...${NC}"
+    echo -e "${YELLOW}Checking for changes on host...${NC}"
     
-    # Fix directory ownership again before git operations
-    fix_directory_ownership
+    # Try git status with retry on lock
+    local max_retries=3
+    local retry_count=0
+    local changes=""
     
-    # Check for changes
-    changes=$($DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git status --porcelain 2>/dev/null || echo "")
+    while [ $retry_count -lt $max_retries ]; do
+        changes=$(git status --porcelain 2>/dev/null || echo "LOCK_ERROR")
+        
+        if [ "$changes" != "LOCK_ERROR" ]; then
+            break
+        fi
+        
+        echo "Git is locked. Waiting 2 seconds... (Attempt $((retry_count+1))/$max_retries)"
+        sleep 2
+        retry_count=$((retry_count + 1))
+        
+        # Fix permissions on retry
+        fix_git_permissions
+    done
     
-    if [ -n "$changes" ]; then
+    if [ -n "$changes" ] && [ "$changes" != "LOCK_ERROR" ]; then
         echo -e "${GREEN}📝 Changes detected:${NC}"
         echo "$changes" | while read line; do
             echo "  $line"
         done
         
         # Add all changes
-        $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git add .
+        git add .
         
         # Create commit with timestamp
         commit_msg="Auto-commit: Notebook work saved on $(date '+%Y-%m-%d %H:%M:%S')"
-        $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git commit -m "$commit_msg"
-        echo -e "${GREEN}✅ Changes committed${NC}"
+        git commit -m "$commit_msg"
+        echo -e "${GREEN}✅ Changes committed on host${NC}"
         
         # Push if remote is configured
-        if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote | grep -q origin; then
-            echo "Pushing to GitHub ($CURRENT_BRANCH) using stored credentials..."
+        if git remote | grep -q origin; then
+            echo "Pushing to GitHub ($CURRENT_BRANCH) from host..."
             
-            # Push with stored credentials
-            if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git push -u origin "$CURRENT_BRANCH" 2>&1; then
+            # Push from host (uses your host's git credentials!)
+            if git push -u origin "$CURRENT_BRANCH" 2>&1; then
                 echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
             else
                 echo -e "${RED}❌ Failed to push to GitHub${NC}"
                 echo ""
-                echo "Debugging information:"
-                echo "1. Remote URL:"
-                $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote -v
-                echo ""
-                echo "2. Git config:"
-                $DOCKER_CMD exec $CONTAINER_NAME git config --global --list
-                echo ""
-                echo "3. Try pushing manually with:"
-                echo "   sudo docker exec -w $WORKSPACE_PATH $CONTAINER_NAME git push origin $CURRENT_BRANCH"
+                echo "Debugging:"
+                echo "  - Make sure you're logged in to GitHub on your host"
+                echo "  - Try running: git push origin $CURRENT_BRANCH"
             fi
         else
             echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"
         fi
+    elif [ "$changes" = "LOCK_ERROR" ]; then
+        echo -e "${RED}❌ Git is locked and couldn't be accessed after $max_retries attempts${NC}"
+        echo "Try running manually: rm -f .git/index.lock"
     else
         echo -e "${GREEN}✅ No changes detected since last commit${NC}"
     fi
@@ -298,47 +246,43 @@ commit_and_push() {
 # Function to show final status
 show_final_status() {
     echo -e "\n${BLUE}=== Git Status ===${NC}"
-    $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git status --short 2>/dev/null || echo "No git repo"
+    git status --short 2>/dev/null || echo "No git repo"
     
     echo -e "\n${BLUE}=== Last Commit ===${NC}"
-    $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git log --oneline -1 2>/dev/null || echo "No commits yet"
+    git log --oneline -1 2>/dev/null || echo "No commits yet"
     
     echo -e "\n${BLUE}=== Remote URL ===${NC}"
-    $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote -v 2>/dev/null || echo "No remote"
+    git remote -v 2>/dev/null || echo "No remote"
 }
 
 # ==================== MAIN EXECUTION ====================
 
 main() {
-    # Check if container is running
-    if ! $DOCKER_CMD ps --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
-        echo -e "${RED}❌ Container $CONTAINER_NAME is not running!${NC}"
-        exit 1
-    fi
+    # Go to the workspace directory on host
+    cd "$WORKSPACE_PATH"
     
-    # Initialize git in container
-    init_git
+    # Fix Git safe.directory issue
+    fix_safe_directory "$WORKSPACE_PATH"
+    
+    # Fix git permissions and remove stale locks
+    fix_git_permissions
+    
+    # Check if git repo exists on host, initialize if needed
+    check_git_repo
     
     # Load or setup configuration
     load_config
     
-    # Setup remote
+    # Setup remote on host
     setup_remote
     
-    # Setup branch
-    setup_branch
-    
-    # Commit and push changes
+    # Commit and push changes from host
     commit_and_push
     
     # Show final status
     show_final_status
     
     echo -e "\n${GREEN}✅ Your work has been backed up!${NC}"
-    echo -e "${CYAN}Container is still running. You can:${NC}"
-    echo "  - Start working again by opening http://localhost:8888"
-    echo "  - Stop container: sudo docker stop $CONTAINER_NAME"
-    echo "  - Remove container: sudo docker rm $CONTAINER_NAME"
 }
 
 # Run main function

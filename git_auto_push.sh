@@ -1,5 +1,5 @@
 #!/bin/bash
-# git_auto_push.sh - Git versioning and auto-push for Jupyter notebooks
+# git_auto_push.sh - Git versioning and auto-push for Jupyter notebooks (HTTPS version)
 
 set -e
 
@@ -7,7 +7,7 @@ set -e
 CONFIG_FILE="$HOME/.jupyter_git_config"
 DEFAULT_BRANCH="main"
 WORKSPACE_PATH="/tf/notebooks"
-SSH_KEY_PATH="$HOME/.ssh/id_ed25519"
+GITHUB_TOKEN=""  # Leave empty to prompt on first push
 # ========================================================
 
 # Colors for output
@@ -27,7 +27,7 @@ if [ $# -eq 0 ]; then
 fi
 
 CONTAINER_NAME="$1"
-TRIGGER_REASON="${2:-}"  # Second argument indicates why script was called
+TRIGGER_REASON="${2:-}"
 DOCKER_CMD="sudo docker"
 
 # Only proceed if triggered by window close or manual
@@ -45,77 +45,6 @@ echo "Workspace: $WORKSPACE_PATH"
 echo "Trigger: Browser window closed - backing up your work..."
 echo ""
 
-# ==================== SSH KEY MANAGEMENT ====================
-
-# Function to setup SSH key on host
-setup_ssh_key() {
-    echo -e "${YELLOW}🔑 Setting up SSH key for GitHub...${NC}"
-    
-    # Check if SSH key already exists
-    if [ ! -f "$SSH_KEY_PATH" ]; then
-        echo "No SSH key found. Generating one..."
-        
-        # Get email for SSH key
-        read -p "Enter your GitHub email address: " github_email
-        
-        # Generate SSH key
-        ssh-keygen -t ed25519 -C "$github_email" -f "$SSH_KEY_PATH" -N ""
-        
-        echo -e "${GREEN}✅ SSH key generated at $SSH_KEY_PATH${NC}"
-    else
-        echo -e "${GREEN}✅ SSH key already exists at $SSH_KEY_PATH${NC}"
-    fi
-    
-    # Start ssh-agent and add key
-    eval "$(ssh-agent -s)" >/dev/null
-    ssh-add "$SSH_KEY_PATH" 2>/dev/null || true
-    
-    # Display public key for GitHub
-    echo ""
-    echo -e "${YELLOW}📋 Your public SSH key (add this to GitHub):${NC}"
-    echo "=================================================================="
-    cat "$SSH_KEY_PATH.pub"
-    echo "=================================================================="
-    echo ""
-    
-    # Ask if user has added the key to GitHub
-    read -p "Have you added this SSH key to GitHub? (y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}Please add the key to GitHub first:${NC}"
-        echo "1. Copy the key above"
-        echo "2. Go to GitHub.com → Settings → SSH and GPG keys"
-        echo "3. Click 'New SSH key', paste the key, and save"
-        echo ""
-        read -p "Press Enter once you've added the key to continue..."
-    fi
-    
-    # Test SSH connection (from host)
-    echo "Testing SSH connection to GitHub..."
-    if ssh -T git@github.com -o StrictHostKeyChecking=accept-new 2>&1 | grep -q "successfully authenticated"; then
-        echo -e "${GREEN}✅ SSH authentication successful!${NC}"
-    else
-        echo -e "${RED}❌ SSH authentication failed. Please check your setup.${NC}"
-        exit 1
-    fi
-}
-
-# Function to convert HTTPS remote to SSH
-convert_to_ssh_remote() {
-    local https_url=$1
-    
-    # Extract username and repo from HTTPS URL
-    # https://github.com/username/repo.git -> git@github.com:username/repo.git
-    if [[ "$https_url" =~ https://github.com/(.+)/(.+).git ]]; then
-        local username="${BASH_REMATCH[1]}"
-        local repo="${BASH_REMATCH[2]}"
-        echo "git@github.com:$username/$repo.git"
-    else
-        # Return original if pattern doesn't match
-        echo "$https_url"
-    fi
-}
-
 # ==================== CONFIGURATION MANAGEMENT ====================
 
 # Load saved configuration
@@ -127,26 +56,28 @@ load_config() {
         echo "   Branch: $CURRENT_BRANCH"
         echo ""
     else
-        # First time setup - ask for repo and setup SSH
+        # First time setup - ask for repo
         echo -e "${PURPLE}========================================${NC}"
         echo -e "${CYAN}📊 First Time GitHub Repository Setup${NC}"
         echo -e "${PURPLE}========================================${NC}"
         
-        # Setup SSH key first
-        setup_ssh_key
-        
-        # Ask for repository
-        read -p "Enter GitHub repository URL (HTTPS or SSH): " GITHUB_REPO
-        
-        # Convert HTTPS to SSH if needed
-        if [[ "$GITHUB_REPO" == https://github.com/* ]]; then
-            echo "Converting HTTPS URL to SSH format..."
-            GITHUB_REPO=$(convert_to_ssh_remote "$GITHUB_REPO")
-            echo "Using: $GITHUB_REPO"
-        fi
-        
+        read -p "Enter GitHub repository URL (HTTPS only): " GITHUB_REPO
         read -p "Enter branch name (default: $DEFAULT_BRANCH): " new_branch
         CURRENT_BRANCH="${new_branch:-$DEFAULT_BRANCH}"
+        
+        # Ask for GitHub credentials (optional)
+        echo ""
+        echo "GitHub Authentication:"
+        echo "1) Use Personal Access Token (recommended)"
+        echo "2) Use username/password (will prompt each time)"
+        read -p "Select option (1-2): " auth_option
+        
+        if [ "$auth_option" == "1" ]; then
+            read -sp "Enter your GitHub Personal Access Token: " GITHUB_TOKEN
+            echo
+            # Store token in config (encourage using token with repo scope)
+            SAVED_TOKEN="$GITHUB_TOKEN"
+        fi
         
         # Save configuration
         cat > "$CONFIG_FILE" << EOF
@@ -154,7 +85,6 @@ load_config() {
 # Last updated: $(date)
 GITHUB_REPO="$GITHUB_REPO"
 CURRENT_BRANCH="$CURRENT_BRANCH"
-# SSH key: $SSH_KEY_PATH
 EOF
         echo -e "${GREEN}✅ Configuration saved to $CONFIG_FILE${NC}"
         echo ""
@@ -163,80 +93,31 @@ EOF
 
 # ==================== GIT OPERATIONS ====================
 
-# Function to install SSH client in container if needed
-install_ssh_in_container() {
-    echo "Checking if SSH client is installed in container..."
-    
-    if ! $DOCKER_CMD exec $CONTAINER_NAME which ssh >/dev/null 2>&1; then
-        echo "Installing SSH client in container..."
-        $DOCKER_CMD exec $CONTAINER_NAME apt-get update
-        $DOCKER_CMD exec $CONTAINER_NAME apt-get install -y openssh-client
-        echo -e "${GREEN}✅ SSH client installed in container${NC}"
-    else
-        echo -e "${GREEN}✅ SSH client already installed${NC}"
-    fi
-}
-
-# FIXED: Function to copy SSH keys into container with better error handling
-copy_ssh_keys_to_container() {
-    echo "Copying SSH keys to container..."
-    
-    # Check if SSH key exists on host
-    if [ ! -f "$SSH_KEY_PATH" ]; then
-        echo -e "${RED}❌ SSH key not found on host at $SSH_KEY_PATH${NC}"
-        setup_ssh_key
-    fi
-    
-    # Create .ssh directory in container with proper permissions
-    echo "Creating .ssh directory in container..."
-    $DOCKER_CMD exec $CONTAINER_NAME mkdir -p /root/.ssh
-    $DOCKER_CMD exec $CONTAINER_NAME chmod 700 /root/.ssh
-    
-    # Copy SSH keys from host to container with verification
-    echo "Copying private key..."
-    cat "$SSH_KEY_PATH" | $DOCKER_CMD exec -i $CONTAINER_NAME sh -c 'cat > /root/.ssh/id_ed25519 && echo "Private key copied" || echo "Failed to copy private key"'
-    
-    echo "Copying public key..."
-    cat "$SSH_KEY_PATH.pub" | $DOCKER_CMD exec -i $CONTAINER_NAME sh -c 'cat > /root/.ssh/id_ed25519.pub && echo "Public key copied" || echo "Failed to copy public key"'
-    
-    # Set correct permissions
-    $DOCKER_CMD exec $CONTAINER_NAME chmod 600 /root/.ssh/id_ed25519
-    $DOCKER_CMD exec $CONTAINER_NAME chmod 644 /root/.ssh/id_ed25519.pub
-    
-    # Verify keys were copied
-    echo "Verifying SSH keys in container:"
-    $DOCKER_CMD exec $CONTAINER_NAME ls -la /root/.ssh/
-    
-    # Add GitHub to known hosts
-    echo "Adding GitHub to known hosts..."
-    $DOCKER_CMD exec $CONTAINER_NAME sh -c 'ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null'
-    
-    echo -e "${GREEN}✅ SSH keys copied to container${NC}"
-}
-
-# FIXED: Function to test SSH connection from container with better output
-test_ssh_connection() {
-    echo "Testing SSH connection from container..."
-    
-    # Try SSH connection and capture output
-    SSH_OUTPUT=$($DOCKER_CMD exec $CONTAINER_NAME ssh -T git@github.com -o StrictHostKeyChecking=accept-new 2>&1 || true)
-    
-    if echo "$SSH_OUTPUT" | grep -q "successfully authenticated"; then
-        echo -e "${GREEN}✅ Container SSH authentication successful!${NC}"
-        return 0
-    elif echo "$SSH_OUTPUT" | grep -q "Hi .*! You've successfully authenticated"; then
-        echo -e "${GREEN}✅ Container SSH authentication successful!${NC}"
-        return 0
-    else
-        echo -e "${YELLOW}⚠️  SSH test output: $SSH_OUTPUT${NC}"
-        echo -e "${YELLOW}⚠️  Container SSH test inconclusive, but keys are in place${NC}"
-        return 0
-    fi
-}
-
 # Function to fix directory ownership
 fix_directory_ownership() {
     $DOCKER_CMD exec $CONTAINER_NAME git config --global --add safe.directory $WORKSPACE_PATH 2>/dev/null || true
+}
+
+# Function to setup git credentials in container
+setup_git_credentials() {
+    echo "Setting up git credentials in container..."
+    
+    # Configure git to cache credentials
+    $DOCKER_CMD exec $CONTAINER_NAME git config --global credential.helper 'cache --timeout=3600'
+    
+    # If we have a saved token, configure it
+    if [ -n "$SAVED_TOKEN" ]; then
+        # Extract username from repo URL or ask
+        if [[ "$GITHUB_REPO" =~ https://github.com/([^/]+)/([^/]+) ]]; then
+            GITHUB_USER="${BASH_REMATCH[1]}"
+            # Store credentials in container's git config
+            $DOCKER_CMD exec $CONTAINER_NAME git config --global user.name "$GITHUB_USER"
+            # Create credentials file
+            $DOCKER_CMD exec $CONTAINER_NAME sh -c "echo 'https://$GITHUB_USER:$SAVED_TOKEN@github.com' > /root/.git-credentials"
+            $DOCKER_CMD exec $CONTAINER_NAME git config --global credential.helper store
+            echo -e "${GREEN}✅ GitHub token configured${NC}"
+        fi
+    fi
 }
 
 # Function to initialize git in the container if needed
@@ -250,23 +131,17 @@ init_git() {
         $DOCKER_CMD exec $CONTAINER_NAME apt-get install -y git
     fi
     
-    # Install SSH client in container
-    install_ssh_in_container
-    
-    # Copy SSH keys to container
-    if [ -f "$SSH_KEY_PATH" ]; then
-        copy_ssh_keys_to_container
-        test_ssh_connection
-    fi
-    
     # Fix directory ownership
     fix_directory_ownership
+    
+    # Setup git credentials
+    setup_git_credentials
     
     # Get system username and email (from host)
     HOST_USER=$(whoami)
     HOST_EMAIL="$HOST_USER@$(hostname)"
     
-    # Configure git user in container (use host info)
+    # Configure git user in container
     $DOCKER_CMD exec $CONTAINER_NAME git config --global user.name "$HOST_USER" 2>/dev/null || true
     $DOCKER_CMD exec $CONTAINER_NAME git config --global user.email "$HOST_EMAIL" 2>/dev/null || true
     
@@ -299,23 +174,9 @@ EOF"
     fi
 }
 
-# FIXED: Function to setup remote with better SSH conversion
+# Function to setup remote
 setup_remote() {
     if [ -n "$GITHUB_REPO" ]; then
-        echo "🔍 Config GITHUB_REPO = '$GITHUB_REPO'"
-        
-        # Convert to SSH if it's HTTPS
-        if [[ "$GITHUB_REPO" == https://github.com/* ]]; then
-            echo "⚠️  Config has HTTPS. Converting to SSH format..."
-            GITHUB_REPO=$(convert_to_ssh_remote "$GITHUB_REPO")
-            echo "✅ Converted to: $GITHUB_REPO"
-            
-            # Update the config file permanently
-            sed -i "s|^GITHUB_REPO=.*|GITHUB_REPO=\"$GITHUB_REPO\"|" "$CONFIG_FILE"
-            echo "✅ Config file updated to SSH"
-        fi
-        
-        # FORCE update the remote URL regardless of comparison
         echo "Setting remote URL to: $GITHUB_REPO"
         
         if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote | grep -q origin; then
@@ -386,23 +247,23 @@ commit_and_push() {
         
         # Push if remote is configured
         if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote | grep -q origin; then
-            echo "Pushing to GitHub ($CURRENT_BRANCH) using SSH..."
+            echo "Pushing to GitHub ($CURRENT_BRANCH) using HTTPS..."
             
-            # Try to push (SSH should work automatically now)
+            # Try to push (HTTPS with token should work)
             if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git push -u origin "$CURRENT_BRANCH" 2>&1; then
                 echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
             else
                 echo -e "${RED}❌ Failed to push to GitHub${NC}"
                 echo ""
                 echo "Debugging information:"
-                echo "1. SSH key in container:"
-                $DOCKER_CMD exec $CONTAINER_NAME ls -la /root/.ssh/ 2>/dev/null || echo "No SSH directory found"
-                echo ""
-                echo "2. Remote URL:"
+                echo "1. Remote URL:"
                 $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote -v
                 echo ""
-                echo "3. SSH connection test:"
-                $DOCKER_CMD exec $CONTAINER_NAME ssh -T git@github.com -o StrictHostKeyChecking=accept-new || true
+                echo "2. Git credentials:"
+                $DOCKER_CMD exec $CONTAINER_NAME git config --global --list | grep -i credential
+                echo ""
+                echo "If you don't have a token, create one at: https://github.com/settings/tokens"
+                echo "Then run this script manually to configure it."
             fi
         else
             echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"

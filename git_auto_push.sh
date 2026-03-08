@@ -64,7 +64,7 @@ fix_git_permissions() {
         echo "Checking git permissions..."
         
         # Fix ownership of .git directory (run with sudo if needed)
-        if [ "$(stat -c '%U' "$git_dir")" != "$USER" ]; then
+        if [ "$(stat -c '%U' "$git_dir" 2>/dev/null)" != "$USER" ]; then
             echo "Fixing .git directory ownership..."
             sudo chown -R "$USER":"$USER" "$git_dir" 2>/dev/null || true
         fi
@@ -143,7 +143,6 @@ check_git_repo() {
     if [ ! -d ".git" ]; then
         echo "Initializing git repository on host..."
         git init
-        git checkout -b "$CURRENT_BRANCH" 2>/dev/null || git checkout -b main
         
         # Create .gitignore
         cat > .gitignore << 'EOF'
@@ -160,6 +159,20 @@ EOF
         git add .
         git commit -m "Initial commit from Jupyter workspace" || true
         echo -e "${GREEN}✅ Git repository initialized on host${NC}"
+    fi
+    
+    # Check if the configured branch exists locally
+    if ! git show-ref --verify --quiet "refs/heads/$CURRENT_BRANCH"; then
+        echo "Local branch '$CURRENT_BRANCH' does not exist. Creating it..."
+        git checkout -b "$CURRENT_BRANCH" 2>/dev/null || git branch "$CURRENT_BRANCH"
+        echo -e "${GREEN}✅ Created local branch: $CURRENT_BRANCH${NC}"
+    fi
+    
+    # Ensure we're on the correct branch
+    current_local_branch=$(git rev-parse --abbrev-ref HEAD)
+    if [ "$current_local_branch" != "$CURRENT_BRANCH" ]; then
+        echo "Switching to branch: $CURRENT_BRANCH"
+        git checkout "$CURRENT_BRANCH" 2>/dev/null || true
     fi
 }
 
@@ -222,15 +235,29 @@ commit_and_push() {
         if git remote | grep -q origin; then
             echo "Pushing to GitHub ($CURRENT_BRANCH) from host..."
             
-            # Push from host (uses your host's git credentials!)
-            if git push -u origin "$CURRENT_BRANCH" 2>&1; then
-                echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
+            # Check if branch exists on remote
+            if git ls-remote --heads origin "$CURRENT_BRANCH" | grep -q "$CURRENT_BRANCH"; then
+                echo "Branch '$CURRENT_BRANCH' exists on remote. Pushing to existing branch..."
+                if git push origin "$CURRENT_BRANCH" 2>&1; then
+                    echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
+                else
+                    echo -e "${RED}❌ Failed to push to GitHub${NC}"
+                    echo ""
+                    echo "Debugging:"
+                    echo "  - Make sure you're logged in to GitHub on your host"
+                    echo "  - Try running: git push origin $CURRENT_BRANCH"
+                fi
             else
-                echo -e "${RED}❌ Failed to push to GitHub${NC}"
-                echo ""
-                echo "Debugging:"
-                echo "  - Make sure you're logged in to GitHub on your host"
-                echo "  - Try running: git push origin $CURRENT_BRANCH"
+                echo "Branch '$CURRENT_BRANCH' does not exist on remote. Creating and pushing new branch..."
+                if git push -u origin "$CURRENT_BRANCH" 2>&1; then
+                    echo -e "${GREEN}✅ Successfully created and pushed new branch '$CURRENT_BRANCH' to GitHub${NC}"
+                else
+                    echo -e "${RED}❌ Failed to push new branch to GitHub${NC}"
+                    echo ""
+                    echo "Debugging:"
+                    echo "  - Make sure you're logged in to GitHub on your host"
+                    echo "  - Try running: git push -u origin $CURRENT_BRANCH"
+                fi
             fi
         else
             echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"
@@ -253,6 +280,9 @@ show_final_status() {
     
     echo -e "\n${BLUE}=== Remote URL ===${NC}"
     git remote -v 2>/dev/null || echo "No remote"
+    
+    echo -e "\n${BLUE}=== Current Branch ===${NC}"
+    git branch --show-current 2>/dev/null || echo "No branch"
 }
 
 # ==================== MAIN EXECUTION ====================
@@ -267,11 +297,11 @@ main() {
     # Fix git permissions and remove stale locks
     fix_git_permissions
     
-    # Check if git repo exists on host, initialize if needed
-    check_git_repo
-    
     # Load or setup configuration
     load_config
+    
+    # Check if git repo exists on host, initialize if needed
+    check_git_repo
     
     # Setup remote on host
     setup_remote

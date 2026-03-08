@@ -1,4 +1,4 @@
 # Jupyter Git Auto-Push Configuration
 # Last updated: (date)
 GITHUB_REPO="https://github.com/pravijupreti/projectSample.git"
-CURRENT_BRANCH="main"
+CURRENT_BRANCH="sub-main"

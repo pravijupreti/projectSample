@@ -177,34 +177,58 @@ install_ssh_in_container() {
     fi
 }
 
-# Function to copy SSH keys into container
+# FIXED: Function to copy SSH keys into container with better error handling
 copy_ssh_keys_to_container() {
     echo "Copying SSH keys to container..."
     
-    # Create .ssh directory in container
-    $DOCKER_CMD exec $CONTAINER_NAME mkdir -p /root/.ssh
+    # Check if SSH key exists on host
+    if [ ! -f "$SSH_KEY_PATH" ]; then
+        echo -e "${RED}❌ SSH key not found on host at $SSH_KEY_PATH${NC}"
+        setup_ssh_key
+    fi
     
-    # Copy SSH keys from host to container
-    cat "$SSH_KEY_PATH" | $DOCKER_CMD exec -i $CONTAINER_NAME sh -c 'cat > /root/.ssh/id_ed25519'
-    cat "$SSH_KEY_PATH.pub" | $DOCKER_CMD exec -i $CONTAINER_NAME sh -c 'cat > /root/.ssh/id_ed25519.pub'
+    # Create .ssh directory in container with proper permissions
+    echo "Creating .ssh directory in container..."
+    $DOCKER_CMD exec $CONTAINER_NAME mkdir -p /root/.ssh
+    $DOCKER_CMD exec $CONTAINER_NAME chmod 700 /root/.ssh
+    
+    # Copy SSH keys from host to container with verification
+    echo "Copying private key..."
+    cat "$SSH_KEY_PATH" | $DOCKER_CMD exec -i $CONTAINER_NAME sh -c 'cat > /root/.ssh/id_ed25519 && echo "Private key copied" || echo "Failed to copy private key"'
+    
+    echo "Copying public key..."
+    cat "$SSH_KEY_PATH.pub" | $DOCKER_CMD exec -i $CONTAINER_NAME sh -c 'cat > /root/.ssh/id_ed25519.pub && echo "Public key copied" || echo "Failed to copy public key"'
     
     # Set correct permissions
     $DOCKER_CMD exec $CONTAINER_NAME chmod 600 /root/.ssh/id_ed25519
     $DOCKER_CMD exec $CONTAINER_NAME chmod 644 /root/.ssh/id_ed25519.pub
     
+    # Verify keys were copied
+    echo "Verifying SSH keys in container:"
+    $DOCKER_CMD exec $CONTAINER_NAME ls -la /root/.ssh/
+    
     # Add GitHub to known hosts
+    echo "Adding GitHub to known hosts..."
     $DOCKER_CMD exec $CONTAINER_NAME sh -c 'ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null'
     
     echo -e "${GREEN}✅ SSH keys copied to container${NC}"
 }
 
-# Function to test SSH connection from container
+# FIXED: Function to test SSH connection from container with better output
 test_ssh_connection() {
     echo "Testing SSH connection from container..."
-    if $DOCKER_CMD exec $CONTAINER_NAME ssh -T git@github.com -o StrictHostKeyChecking=accept-new 2>&1 | grep -q "successfully authenticated"; then
+    
+    # Try SSH connection and capture output
+    SSH_OUTPUT=$($DOCKER_CMD exec $CONTAINER_NAME ssh -T git@github.com -o StrictHostKeyChecking=accept-new 2>&1 || true)
+    
+    if echo "$SSH_OUTPUT" | grep -q "successfully authenticated"; then
+        echo -e "${GREEN}✅ Container SSH authentication successful!${NC}"
+        return 0
+    elif echo "$SSH_OUTPUT" | grep -q "Hi .*! You've successfully authenticated"; then
         echo -e "${GREEN}✅ Container SSH authentication successful!${NC}"
         return 0
     else
+        echo -e "${YELLOW}⚠️  SSH test output: $SSH_OUTPUT${NC}"
         echo -e "${YELLOW}⚠️  Container SSH test inconclusive, but keys are in place${NC}"
         return 0
     fi
@@ -275,20 +299,36 @@ EOF"
     fi
 }
 
-# Function to setup remote
+# FIXED: Function to setup remote with better SSH conversion
 setup_remote() {
     if [ -n "$GITHUB_REPO" ]; then
-        # Check if remote exists
+        echo "🔍 Config GITHUB_REPO = '$GITHUB_REPO'"
+        
+        # Convert to SSH if it's HTTPS
+        if [[ "$GITHUB_REPO" == https://github.com/* ]]; then
+            echo "⚠️  Config has HTTPS. Converting to SSH format..."
+            GITHUB_REPO=$(convert_to_ssh_remote "$GITHUB_REPO")
+            echo "✅ Converted to: $GITHUB_REPO"
+            
+            # Update the config file permanently
+            sed -i "s|^GITHUB_REPO=.*|GITHUB_REPO=\"$GITHUB_REPO\"|" "$CONFIG_FILE"
+            echo "✅ Config file updated to SSH"
+        fi
+        
+        # FORCE update the remote URL regardless of comparison
+        echo "Setting remote URL to: $GITHUB_REPO"
+        
         if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote | grep -q origin; then
-            current_remote=$($DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote get-url origin 2>/dev/null)
-            if [ "$current_remote" != "$GITHUB_REPO" ]; then
-                echo "Updating remote URL to SSH format..."
-                $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote set-url origin "$GITHUB_REPO"
-            fi
+            echo "Updating existing remote origin..."
+            $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote set-url origin "$GITHUB_REPO"
         else
-            echo "Adding remote origin: $GITHUB_REPO"
+            echo "Adding remote origin..."
             $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote add origin "$GITHUB_REPO"
         fi
+        
+        # Verify the remote URL was set correctly
+        echo "Verifying remote URL after update:"
+        $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote -v
     fi
 }
 
@@ -356,13 +396,13 @@ commit_and_push() {
                 echo ""
                 echo "Debugging information:"
                 echo "1. SSH key in container:"
-                $DOCKER_CMD exec $CONTAINER_NAME ls -la /root/.ssh/
+                $DOCKER_CMD exec $CONTAINER_NAME ls -la /root/.ssh/ 2>/dev/null || echo "No SSH directory found"
                 echo ""
                 echo "2. Remote URL:"
                 $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote -v
                 echo ""
                 echo "3. SSH connection test:"
-                $DOCKER_CMD exec $CONTAINER_NAME ssh -vT git@github.com -o StrictHostKeyChecking=accept-new || true
+                $DOCKER_CMD exec $CONTAINER_NAME ssh -T git@github.com -o StrictHostKeyChecking=accept-new || true
             fi
         else
             echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"

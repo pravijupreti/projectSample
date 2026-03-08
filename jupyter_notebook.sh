@@ -35,23 +35,55 @@ esac
 echo "Package manager: $PKG"
 
 # -----------------------------
-# Remove old Docker installs
+# Function to check if Docker is already installed and working
 # -----------------------------
-echo "Removing old Docker versions..."
-case "$PKG" in
-    apt) 
-        sudo apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-        sudo apt remove -y docker-ce docker-ce-cli containerd.io 2>/dev/null || true
-        ;;
-    dnf|yum) sudo "$PKG" remove -y docker* || true ;;
-    pacman) sudo pacman -Rns --noconfirm docker || true ;;
-    zypper) sudo zypper remove -y docker || true ;;
-esac
+check_docker_installed() {
+    # Check if docker command exists
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+    
+    # Check if docker service is running
+    if command -v systemctl >/dev/null 2>&1; then
+        if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
+            return 1
+        fi
+    fi
+    
+    # Check if we can run docker commands
+    if ! sudo docker info >/dev/null 2>&1; then
+        return 1
+    fi
+    
+    return 0
+}
 
 # -----------------------------
-# Install Docker
+# Check if Docker is already installed
 # -----------------------------
-if ! command -v docker >/dev/null 2>&1; then
+if check_docker_installed; then
+    echo "✅ Docker is already installed and running: $(sudo docker --version | cut -d, -f1)"
+else
+    echo "Docker not found or not running. Installing..."
+
+    # -----------------------------
+    # Remove old Docker installs (only if we're going to reinstall)
+    # -----------------------------
+    echo "Removing old Docker versions..."
+    case "$PKG" in
+        apt) 
+            sudo apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+            sudo apt remove -y docker-ce docker-ce-cli containerd.io 2>/dev/null || true
+            sudo rm -rf /var/lib/docker /etc/docker
+            ;;
+        dnf|yum) sudo "$PKG" remove -y docker* || true ;;
+        pacman) sudo pacman -Rns --noconfirm docker || true ;;
+        zypper) sudo zypper remove -y docker || true ;;
+    esac
+
+    # -----------------------------
+    # Install Docker
+    # -----------------------------
     echo "Installing Docker..."
     case "$PKG" in
         apt)
@@ -68,41 +100,42 @@ if ! command -v docker >/dev/null 2>&1; then
         pacman) sudo pacman -S --noconfirm docker ;;
         zypper) sudo zypper install -y docker ;;
     esac
-fi
 
-# -----------------------------
-# Start and verify Docker service
-# -----------------------------
-if command -v systemctl >/dev/null 2>&1; then
-    echo "Starting Docker service..."
-    sudo systemctl enable docker
-    sudo systemctl start docker
-    
-    # Wait a moment for Docker to start
-    sleep 3
-    
-    # Verify Docker is running
-    if ! sudo systemctl is-active --quiet docker; then
-        echo "Docker service failed to start"
-        sudo systemctl status docker --no-pager
-        exit 1
+    # -----------------------------
+    # Start and verify Docker service
+    # -----------------------------
+    if command -v systemctl >/dev/null 2>&1; then
+        echo "Starting Docker service..."
+        sudo systemctl enable docker
+        sudo systemctl start docker
+        
+        # Wait a moment for Docker to start
+        sleep 3
+        
+        # Verify Docker is running
+        if ! sudo systemctl is-active --quiet docker; then
+            echo "Docker service failed to start"
+            sudo systemctl status docker --no-pager
+            exit 1
+        fi
+        echo "Docker service is running"
     fi
-    echo "Docker service is running"
+
+    echo "Docker installed: $(sudo docker --version | cut -d, -f1)"
 fi
 
-echo "Docker installed: $(sudo docker --version | cut -d, -f1)"
-
 # -----------------------------
-# Add user to docker group
+# Add user to docker group (only if not already in group)
 # -----------------------------
 USE_SUDO="sudo"
-if ! groups "$USER" | grep -q docker; then
+if ! groups "$USER" 2>/dev/null | grep -q docker; then
     sudo usermod -aG docker "$USER"
     echo "Added $USER to docker group. Log out and back in to use Docker without sudo."
 else
     # Check if we can run without sudo (after group changes take effect)
     if docker info >/dev/null 2>&1; then
         USE_SUDO=""
+        echo "✅ Can run Docker without sudo"
     fi
 fi
 
@@ -133,18 +166,32 @@ for ((i=1; i<=MAX_RETRIES; i++)); do
 done
 
 # -----------------------------
-# Test Docker container
+# Test Docker container (only if we haven't tested before)
 # -----------------------------
 echo "Running test container..."
 if sudo docker run --rm hello-world >/dev/null 2>&1; then
-    echo "Docker test container ran successfully!"
+    echo "✅ Docker test container ran successfully!"
 else
     echo "Docker test failed"
     sudo docker run --rm hello-world
     exit 1
 fi
 
-echo "✅ Docker installation complete!"
+echo "✅ Docker is ready!"
+
+# -----------------------------
+# Check if Jupyter container already exists
+# -----------------------------
+CONTAINER_NAME="jupyter-tf-gpu"
+if sudo docker ps -a --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
+    echo "✅ Jupyter container '$CONTAINER_NAME' already exists"
+    if ! sudo docker ps --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
+        echo "Starting existing container..."
+        sudo docker start $CONTAINER_NAME
+    else
+        echo "Container already running"
+    fi
+fi
 
 # -----------------------------
 # Launch GPU-enabled Jupyter Notebook

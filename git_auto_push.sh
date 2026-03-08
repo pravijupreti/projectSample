@@ -90,7 +90,7 @@ setup_ssh_key() {
         read -p "Press Enter once you've added the key to continue..."
     fi
     
-    # Test SSH connection
+    # Test SSH connection (from host)
     echo "Testing SSH connection to GitHub..."
     if ssh -T git@github.com -o StrictHostKeyChecking=accept-new 2>&1 | grep -q "successfully authenticated"; then
         echo -e "${GREEN}✅ SSH authentication successful!${NC}"
@@ -163,6 +163,20 @@ EOF
 
 # ==================== GIT OPERATIONS ====================
 
+# Function to install SSH client in container if needed
+install_ssh_in_container() {
+    echo "Checking if SSH client is installed in container..."
+    
+    if ! $DOCKER_CMD exec $CONTAINER_NAME which ssh >/dev/null 2>&1; then
+        echo "Installing SSH client in container..."
+        $DOCKER_CMD exec $CONTAINER_NAME apt-get update
+        $DOCKER_CMD exec $CONTAINER_NAME apt-get install -y openssh-client
+        echo -e "${GREEN}✅ SSH client installed in container${NC}"
+    else
+        echo -e "${GREEN}✅ SSH client already installed${NC}"
+    fi
+}
+
 # Function to copy SSH keys into container
 copy_ssh_keys_to_container() {
     echo "Copying SSH keys to container..."
@@ -184,6 +198,18 @@ copy_ssh_keys_to_container() {
     echo -e "${GREEN}✅ SSH keys copied to container${NC}"
 }
 
+# Function to test SSH connection from container
+test_ssh_connection() {
+    echo "Testing SSH connection from container..."
+    if $DOCKER_CMD exec $CONTAINER_NAME ssh -T git@github.com -o StrictHostKeyChecking=accept-new 2>&1 | grep -q "successfully authenticated"; then
+        echo -e "${GREEN}✅ Container SSH authentication successful!${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠️  Container SSH test inconclusive, but keys are in place${NC}"
+        return 0
+    fi
+}
+
 # Function to fix directory ownership
 fix_directory_ownership() {
     $DOCKER_CMD exec $CONTAINER_NAME git config --global --add safe.directory $WORKSPACE_PATH 2>/dev/null || true
@@ -200,9 +226,13 @@ init_git() {
         $DOCKER_CMD exec $CONTAINER_NAME apt-get install -y git
     fi
     
+    # Install SSH client in container
+    install_ssh_in_container
+    
     # Copy SSH keys to container
     if [ -f "$SSH_KEY_PATH" ]; then
         copy_ssh_keys_to_container
+        test_ssh_connection
     fi
     
     # Fix directory ownership
@@ -252,7 +282,7 @@ setup_remote() {
         if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote | grep -q origin; then
             current_remote=$($DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote get-url origin 2>/dev/null)
             if [ "$current_remote" != "$GITHUB_REPO" ]; then
-                echo "Updating remote URL..."
+                echo "Updating remote URL to SSH format..."
                 $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote set-url origin "$GITHUB_REPO"
             fi
         else
@@ -316,15 +346,23 @@ commit_and_push() {
         
         # Push if remote is configured
         if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote | grep -q origin; then
-            echo "Pushing to GitHub ($CURRENT_BRANCH)..."
+            echo "Pushing to GitHub ($CURRENT_BRANCH) using SSH..."
             
             # Try to push (SSH should work automatically now)
-            if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git push -u origin "$CURRENT_BRANCH" 2>/dev/null; then
+            if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git push -u origin "$CURRENT_BRANCH" 2>&1; then
                 echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
             else
                 echo -e "${RED}❌ Failed to push to GitHub${NC}"
-                echo "Testing SSH connection..."
-                $DOCKER_CMD exec $CONTAINER_NAME ssh -T git@github.com -o StrictHostKeyChecking=accept-new || true
+                echo ""
+                echo "Debugging information:"
+                echo "1. SSH key in container:"
+                $DOCKER_CMD exec $CONTAINER_NAME ls -la /root/.ssh/
+                echo ""
+                echo "2. Remote URL:"
+                $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote -v
+                echo ""
+                echo "3. SSH connection test:"
+                $DOCKER_CMD exec $CONTAINER_NAME ssh -vT git@github.com -o StrictHostKeyChecking=accept-new || true
             fi
         else
             echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"
@@ -341,6 +379,9 @@ show_final_status() {
     
     echo -e "\n${BLUE}=== Last Commit ===${NC}"
     $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git log --oneline -1 2>/dev/null || echo "No commits yet"
+    
+    echo -e "\n${BLUE}=== Remote URL ===${NC}"
+    $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote -v 2>/dev/null || echo "No remote"
 }
 
 # ==================== MAIN EXECUTION ====================

@@ -1,13 +1,13 @@
 #!/bin/bash
-# git_auto_push.sh - Git versioning and auto-push for Jupyter notebooks (HTTPS version)
+# git_auto_push.sh - Git versioning and auto-push for Jupyter notebooks (HTTP version with credentials)
 
 set -e
 
 # ==================== CONFIGURATION ====================
 CONFIG_FILE="$HOME/.jupyter_git_config"
+CREDENTIALS_FILE="$HOME/.git-credentials"
 DEFAULT_BRANCH="main"
 WORKSPACE_PATH="/tf/notebooks"
-GITHUB_TOKEN=""  # Leave empty to prompt on first push
 # ========================================================
 
 # Colors for output
@@ -45,6 +45,33 @@ echo "Workspace: $WORKSPACE_PATH"
 echo "Trigger: Browser window closed - backing up your work..."
 echo ""
 
+# ==================== CREDENTIALS MANAGEMENT ====================
+
+# Function to setup git credentials (only once)
+setup_git_credentials() {
+    if [ ! -f "$CREDENTIALS_FILE" ]; then
+        echo -e "${YELLOW}🔑 First-time git credentials setup...${NC}"
+        echo "================================================"
+        echo "Please enter your GitHub credentials for HTTP authentication."
+        echo "These will be stored securely in $CREDENTIALS_FILE"
+        echo "================================================"
+        echo ""
+        
+        read -p "Enter your GitHub username: " GITHUB_USERNAME
+        read -sp "Enter your GitHub password (or token): " GITHUB_PASSWORD
+        echo ""
+        
+        # Save credentials securely
+        echo "https://$GITHUB_USERNAME:$GITHUB_PASSWORD@github.com" > "$CREDENTIALS_FILE"
+        chmod 600 "$CREDENTIALS_FILE"
+        
+        echo -e "${GREEN}✅ Credentials saved securely${NC}"
+        echo ""
+    else
+        echo -e "${GREEN}✅ Using saved credentials${NC}"
+    fi
+}
+
 # ==================== CONFIGURATION MANAGEMENT ====================
 
 # Load saved configuration
@@ -61,23 +88,12 @@ load_config() {
         echo -e "${CYAN}📊 First Time GitHub Repository Setup${NC}"
         echo -e "${PURPLE}========================================${NC}"
         
+        # Setup credentials first
+        setup_git_credentials
+        
         read -p "Enter GitHub repository URL (HTTPS only): " GITHUB_REPO
         read -p "Enter branch name (default: $DEFAULT_BRANCH): " new_branch
         CURRENT_BRANCH="${new_branch:-$DEFAULT_BRANCH}"
-        
-        # Ask for GitHub credentials (optional)
-        echo ""
-        echo "GitHub Authentication:"
-        echo "1) Use Personal Access Token (recommended)"
-        echo "2) Use username/password (will prompt each time)"
-        read -p "Select option (1-2): " auth_option
-        
-        if [ "$auth_option" == "1" ]; then
-            read -sp "Enter your GitHub Personal Access Token: " GITHUB_TOKEN
-            echo
-            # Store token in config (encourage using token with repo scope)
-            SAVED_TOKEN="$GITHUB_TOKEN"
-        fi
         
         # Save configuration
         cat > "$CONFIG_FILE" << EOF
@@ -98,24 +114,30 @@ fix_directory_ownership() {
     $DOCKER_CMD exec $CONTAINER_NAME git config --global --add safe.directory $WORKSPACE_PATH 2>/dev/null || true
 }
 
-# Function to setup git credentials in container
-setup_git_credentials() {
-    echo "Setting up git credentials in container..."
+# Function to setup git in container with credentials
+setup_container_git() {
+    echo "Setting up git in container with credentials..."
     
-    # Configure git to cache credentials
-    $DOCKER_CMD exec $CONTAINER_NAME git config --global credential.helper 'cache --timeout=3600'
-    
-    # If we have a saved token, configure it
-    if [ -n "$SAVED_TOKEN" ]; then
-        # Extract username from repo URL or ask
-        if [[ "$GITHUB_REPO" =~ https://github.com/([^/]+)/([^/]+) ]]; then
-            GITHUB_USER="${BASH_REMATCH[1]}"
-            # Store credentials in container's git config
-            $DOCKER_CMD exec $CONTAINER_NAME git config --global user.name "$GITHUB_USER"
-            # Create credentials file
-            $DOCKER_CMD exec $CONTAINER_NAME sh -c "echo 'https://$GITHUB_USER:$SAVED_TOKEN@github.com' > /root/.git-credentials"
+    # Read credentials
+    if [ -f "$CREDENTIALS_FILE" ]; then
+        CREDENTIALS=$(cat "$CREDENTIALS_FILE")
+        
+        # Extract username and password from credentials file
+        if [[ "$CREDENTIALS" =~ https://([^:]+):([^@]+)@github\.com ]]; then
+            GITHUB_USERNAME="${BASH_REMATCH[1]}"
+            GITHUB_PASSWORD="${BASH_REMATCH[2]}"
+            
+            # Configure git in container to use these credentials
+            $DOCKER_CMD exec $CONTAINER_NAME git config --global user.name "$GITHUB_USERNAME"
+            
+            # Set up credential helper in container
             $DOCKER_CMD exec $CONTAINER_NAME git config --global credential.helper store
-            echo -e "${GREEN}✅ GitHub token configured${NC}"
+            
+            # Create .git-credentials file in container
+            $DOCKER_CMD exec $CONTAINER_NAME sh -c "mkdir -p /root && echo '$CREDENTIALS' > /root/.git-credentials"
+            $DOCKER_CMD exec $CONTAINER_NAME chmod 600 /root/.git-credentials
+            
+            echo -e "${GREEN}✅ Git credentials configured in container${NC}"
         fi
     fi
 }
@@ -134,14 +156,14 @@ init_git() {
     # Fix directory ownership
     fix_directory_ownership
     
-    # Setup git credentials
-    setup_git_credentials
+    # Setup git with credentials
+    setup_container_git
     
-    # Get system username and email (from host)
+    # Get system username and email (from host) as fallback
     HOST_USER=$(whoami)
     HOST_EMAIL="$HOST_USER@$(hostname)"
     
-    # Configure git user in container
+    # Configure git user in container (if not already set)
     $DOCKER_CMD exec $CONTAINER_NAME git config --global user.name "$HOST_USER" 2>/dev/null || true
     $DOCKER_CMD exec $CONTAINER_NAME git config --global user.email "$HOST_EMAIL" 2>/dev/null || true
     
@@ -247,9 +269,9 @@ commit_and_push() {
         
         # Push if remote is configured
         if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote | grep -q origin; then
-            echo "Pushing to GitHub ($CURRENT_BRANCH) using HTTPS..."
+            echo "Pushing to GitHub ($CURRENT_BRANCH) using stored credentials..."
             
-            # Try to push (HTTPS with token should work)
+            # Push with stored credentials
             if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git push -u origin "$CURRENT_BRANCH" 2>&1; then
                 echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
             else
@@ -259,11 +281,11 @@ commit_and_push() {
                 echo "1. Remote URL:"
                 $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote -v
                 echo ""
-                echo "2. Git credentials:"
-                $DOCKER_CMD exec $CONTAINER_NAME git config --global --list | grep -i credential
+                echo "2. Git config:"
+                $DOCKER_CMD exec $CONTAINER_NAME git config --global --list
                 echo ""
-                echo "If you don't have a token, create one at: https://github.com/settings/tokens"
-                echo "Then run this script manually to configure it."
+                echo "3. Try pushing manually with:"
+                echo "   sudo docker exec -w $WORKSPACE_PATH $CONTAINER_NAME git push origin $CURRENT_BRANCH"
             fi
         else
             echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"
@@ -294,7 +316,7 @@ main() {
         exit 1
     fi
     
-    # Initialize git
+    # Initialize git in container
     init_git
     
     # Load or setup configuration

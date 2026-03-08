@@ -40,32 +40,65 @@ install_nvidia_toolkit() {
     sleep 5
 }
 
-# Function to open browser
-open_browser() {
+# Function to open browser in NEW WINDOW (not tab) and capture its PID
+open_browser_new_window() {
     local url=$1
-    echo "Opening browser at $url"
+    echo "Opening browser in NEW WINDOW at $url"
     
-    # Detect OS and open browser accordingly
+    # Detect OS and open browser in new window
     case "$(uname -s)" in
         Linux)
-            if command -v xdg-open >/dev/null 2>&1; then
+            # Try different browsers with new-window flag
+            if command -v google-chrome >/dev/null 2>&1; then
+                google-chrome --new-window "$url" >/dev/null 2>&1 &
+                browser_pid=$!
+                echo $browser_pid > /tmp/jupyter_browser.pid
+                echo "Browser PID: $browser_pid"
+            elif command -v chrome-browser >/dev/null 2>&1; then
+                chrome-browser --new-window "$url" >/dev/null 2>&1 &
+                browser_pid=$!
+                echo $browser_pid > /tmp/jupyter_browser.pid
+            elif command -v firefox >/dev/null 2>&1; then
+                firefox --new-window "$url" >/dev/null 2>&1 &
+                browser_pid=$!
+                echo $browser_pid > /tmp/jupyter_browser.pid
+            elif command -v brave-browser >/dev/null 2>&1; then
+                brave-browser --new-window "$url" >/dev/null 2>&1 &
+                browser_pid=$!
+                echo $browser_pid > /tmp/jupyter_browser.pid
+            elif command -v chromium >/dev/null 2>&1; then
+                chromium --new-window "$url" >/dev/null 2>&1 &
+                browser_pid=$!
+                echo $browser_pid > /tmp/jupyter_browser.pid
+            elif command -v xdg-open >/dev/null 2>&1; then
+                # Fallback to xdg-open but we can't guarantee new window
                 xdg-open "$url" >/dev/null 2>&1 &
-            elif command -v gnome-open >/dev/null 2>&1; then
-                gnome-open "$url" >/dev/null 2>&1 &
-            elif command -v kde-open >/dev/null 2>&1; then
-                kde-open "$url" >/dev/null 2>&1 &
+                echo "⚠️  Using xdg-open - may open in new tab"
+                # Try to find the browser PID
+                sleep 2
+                browser_pid=$(pgrep -n "chrome|firefox|brave|opera|chromium" 2>/dev/null || echo "")
+                if [ -n "$browser_pid" ]; then
+                    echo $browser_pid > /tmp/jupyter_browser.pid
+                fi
             else
-                echo "⚠️  Could not detect browser launcher. Please open $url manually."
+                echo "⚠️  Could not detect browser. Please open $url manually in a NEW WINDOW."
             fi
             ;;
         Darwin)  # macOS
-            open "$url" >/dev/null 2>&1 &
+            # On macOS, open in new window
+            open -na "Google Chrome" --args --new-window "$url" 2>/dev/null || \
+            open -na "Firefox" --args --new-window "$url" 2>/dev/null || \
+            open -na "Safari" "$url" 2>/dev/null &
+            echo $! > /tmp/jupyter_browser.pid
             ;;
         CYGWIN*|MINGW*|MSYS*)  # Windows
-            start "$url" >/dev/null 2>&1 &
+            start "chrome" --new-window "$url" 2>/dev/null || \
+            start "firefox" --new-window "$url" 2>/dev/null || \
+            start "$url" 2>/dev/null &
+            echo $! > /tmp/jupyter_browser.pid
             ;;
         *)
-            echo "⚠️  Unsupported OS for auto-launch. Please open $url manually."
+            echo "⚠️  Unsupported OS. Please open $url manually in a NEW WINDOW."
             ;;
     esac
 }
@@ -91,105 +124,51 @@ wait_for_jupyter() {
     return 1
 }
 
-# Function to get kernel count safely
-get_kernel_count() {
-    local port=$1
-    local count=0
-    
-    # Try to get kernels via API
-    local response=$(curl -s http://localhost:$port/api/kernels 2>/dev/null)
-    if [ -n "$response" ] && [ "$response" != "null" ]; then
-        # Count the number of kernel objects
-        count=$(echo "$response" | grep -o '"id"' | wc -l | tr -d ' ')
-    fi
-    
-    echo "$count"
-}
-
-# Function to get session count safely
-get_session_count() {
-    local port=$1
-    local count=0
-    
-    # Try to get sessions via API
-    local response=$(curl -s http://localhost:$port/api/sessions 2>/dev/null)
-    if [ -n "$response" ] && [ "$response" != "null" ]; then
-        # Count the number of session objects
-        count=$(echo "$response" | grep -o '"id"' | wc -l | tr -d ' ')
-    fi
-    
-    echo "$count"
-}
-
-# Function to monitor Jupyter kernel activity
-monitor_jupyter_kernel() {
+# Function to monitor browser window and trigger git push when closed
+monitor_browser_window() {
     local container_name=$1
-    local port=$2
     
-    echo "🖥️  Monitoring Jupyter kernel activity..."
-    echo "   The git backup will trigger when you shut down all kernels"
-    echo "   (To shut down kernels: File → Shut Down, or click 'Shutdown' in kernel menu)"
-    echo ""
+    if [ ! -f /tmp/jupyter_browser.pid ]; then
+        echo "⚠️  Browser PID not found."
+        echo "   Please close the browser window manually and then run:"
+        echo "   ./git_auto_push.sh $container_name manual"
+        return
+    fi
     
-    local last_kernel_count=0
-    local last_session_count=0
-    local idle_time=0
-    local max_idle=5  # Wait 5 seconds after kernels close before triggering
-    local first_run=true
+    browser_pid=$(cat /tmp/jupyter_browser.pid)
     
-    while true; do
-        # Get current counts safely
-        kernel_count=$(get_kernel_count $port)
-        session_count=$(get_session_count $port)
-        
-        # Clean the counts (remove any whitespace/newlines)
-        kernel_count=$(echo "$kernel_count" | tr -d '\n\r')
-        session_count=$(echo "$session_count" | tr -d '\n\r')
-        
-        # Ensure they're numbers
-        if ! [[ "$kernel_count" =~ ^[0-9]+$ ]]; then
-            kernel_count=0
-        fi
-        if ! [[ "$session_count" =~ ^[0-9]+$ ]]; then
-            session_count=0
-        fi
-        
-        # Show status on changes or periodically
-        if [ "$kernel_count" -ne "$last_kernel_count" ] || [ "$session_count" -ne "$last_session_count" ] || [ $first_run = true ]; then
-            if [ "$kernel_count" -gt 0 ] || [ "$session_count" -gt 0 ]; then
-                echo "📊 $kernel_count active kernel(s), $session_count session(s) running..."
-            fi
-            last_kernel_count=$kernel_count
-            last_session_count=$session_count
-            first_run=false
-        fi
-        
-        # If no kernels/sessions active, start idle timer
-        if [ "$kernel_count" -eq 0 ] && [ "$session_count" -eq 0 ]; then
-            idle_time=$((idle_time + 2))
-            if [ $idle_time -ge $max_idle ]; then
-                echo ""
-                echo "🔍 No active kernels for $max_idle seconds. Triggering git backup..."
-                
-                # Small delay to ensure any final saves are complete
-                sleep 2
-                
-                # Call the git push script
-                if [ -f "./git_auto_push.sh" ]; then
-                    chmod +x ./git_auto_push.sh
-                    ./git_auto_push.sh "$container_name" "kernel_closed"
-                else
-                    echo "❌ git_auto_push.sh not found! Please create it."
-                fi
-                break
-            fi
-        else
-            # Reset idle timer if kernels are active
-            idle_time=0
-        fi
-        
+    # Verify the PID is still running
+    if ! kill -0 $browser_pid 2>/dev/null; then
+        echo "⚠️  Browser PID $browser_pid is not valid."
+        rm -f /tmp/jupyter_browser.pid
+        return
+    fi
+    
+    echo "🖥️  Monitoring dedicated browser window (PID: $browser_pid)..."
+    echo "   CLOSE THE BROWSER WINDOW when you're done working to trigger git backup"
+    echo "   (This is a dedicated window - closing it will not affect your other browser tabs)"
+    
+    # Monitor the specific browser process
+    while kill -0 $browser_pid 2>/dev/null; do
         sleep 2
     done
+    
+    echo ""
+    echo "🔍 Browser window closed! Triggering git backup..."
+    
+    # Small delay to ensure any final saves are complete
+    sleep 3
+    
+    # Call the git push script
+    if [ -f "./git_auto_push.sh" ]; then
+        chmod +x ./git_auto_push.sh
+        ./git_auto_push.sh "$container_name" "window_closed"
+    else
+        echo "❌ git_auto_push.sh not found! Please create it."
+    fi
+    
+    # Clean up
+    rm -f /tmp/jupyter_browser.pid
 }
 
 # Check for NVIDIA GPU
@@ -236,9 +215,10 @@ if command -v nvidia-smi >/dev/null 2>&1; then
         
         echo "✅ Jupyter Notebook with TensorFlow GPU support is running!"
         
-        # Wait for Jupyter to be ready and auto-launch browser
+        # Wait for Jupyter to be ready
         if wait_for_jupyter $PORT; then
-            open_browser "http://localhost:$PORT/tree"
+            # Open browser in NEW WINDOW
+            open_browser_new_window "http://localhost:$PORT/tree"
         else
             echo "Please access it manually at: http://localhost:$PORT"
         fi
@@ -257,8 +237,8 @@ if command -v nvidia-smi >/dev/null 2>&1; then
         echo ""
         echo "If you see GPU devices listed, everything is working correctly!"
         
-        # Monitor Jupyter kernel and trigger git backup when kernels are closed
-        monitor_jupyter_kernel "$CONTAINER_NAME" "$PORT"
+        # Monitor the dedicated browser window
+        monitor_browser_window "$CONTAINER_NAME"
         
     else
         echo "Failed to configure NVIDIA runtime. Checking Docker runtime configuration..."
@@ -295,9 +275,10 @@ else
     
     echo "Jupyter Notebook with TensorFlow CPU is running!"
     
-    # Wait for Jupyter to be ready and auto-launch browser
+    # Wait for Jupyter to be ready
     if wait_for_jupyter $PORT; then
-        open_browser "http://localhost:$PORT/tree"
+        # Open browser in NEW WINDOW
+        open_browser_new_window "http://localhost:$PORT/tree"
     else
         echo "Please access it manually at: http://localhost:$PORT"
     fi
@@ -307,8 +288,8 @@ else
     echo "Container logs:"
     $DOCKER_CMD logs $CONTAINER_NAME --tail 10
     
-    # Monitor Jupyter kernel and trigger git backup when kernels are closed
-    monitor_jupyter_kernel "$CONTAINER_NAME" "$PORT"
+    # Monitor the dedicated browser window
+    monitor_browser_window "$CONTAINER_NAME"
 fi
 
 echo ""

@@ -1,6 +1,5 @@
 #!/bin/bash
 # git_auto_push.sh - Git versioning and auto-push for Jupyter notebooks
-# This script is called by launch_jupyter_gpu.sh when kernels are closed
 
 set -e
 
@@ -22,7 +21,7 @@ NC='\033[0m' # No Color
 # Get container name from argument
 if [ $# -eq 0 ]; then
     echo -e "${RED}❌ Error: Container name not provided${NC}"
-    echo "Usage: $0 <container_name> [kernel_closed]"
+    echo "Usage: $0 <container_name> [window_closed|manual]"
     exit 1
 fi
 
@@ -30,9 +29,9 @@ CONTAINER_NAME="$1"
 TRIGGER_REASON="${2:-}"  # Second argument indicates why script was called
 DOCKER_CMD="sudo docker"
 
-# IMPORTANT: Only proceed if triggered by kernel close
-if [ "$TRIGGER_REASON" != "kernel_closed" ]; then
-    echo -e "${YELLOW}⚠️  This script should only be called when Jupyter kernels are closed.${NC}"
+# Only proceed if triggered by window close or manual
+if [ "$TRIGGER_REASON" != "window_closed" ] && [ "$TRIGGER_REASON" != "manual" ]; then
+    echo -e "${YELLOW}⚠️  This script should only be called when browser window closes.${NC}"
     echo "Exiting..."
     exit 0
 fi
@@ -42,7 +41,7 @@ echo -e "${GREEN}📦 Git Auto-Push for Jupyter Notebooks${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo "Container: $CONTAINER_NAME"
 echo "Workspace: $WORKSPACE_PATH"
-echo "Trigger: Jupyter kernels closed - backing up your work..."
+echo "Trigger: Browser window closed - backing up your work..."
 echo ""
 
 # ==================== CONFIGURATION MANAGEMENT ====================

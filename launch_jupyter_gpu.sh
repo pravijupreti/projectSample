@@ -50,7 +50,9 @@ open_browser() {
         Linux)
             if command -v xdg-open >/dev/null 2>&1; then
                 xdg-open "$url" >/dev/null 2>&1 &
-                echo $! > /tmp/jupyter_browser.pid
+                browser_pid=$!
+                echo $browser_pid > /tmp/jupyter_browser.pid
+                echo "Browser PID: $browser_pid"
             elif command -v gnome-open >/dev/null 2>&1; then
                 gnome-open "$url" >/dev/null 2>&1 &
                 echo $! > /tmp/jupyter_browser.pid
@@ -117,10 +119,14 @@ monitor_browser() {
     echo ""
     echo "🔍 Browser closed! Triggering git backup..."
     
+    # Small delay to ensure any final saves are complete
+    sleep 3
+    
     # Call the git push script
     if [ -f "./git_auto_push.sh" ]; then
         chmod +x ./git_auto_push.sh
-        ./git_auto_push.sh "$container_name"
+        # Pass both container name and a flag indicating browser closed
+        ./git_auto_push.sh "$container_name" "browser_closed"
     else
         echo "❌ git_auto_push.sh not found! Please create it."
     fi
@@ -157,11 +163,11 @@ if command -v nvidia-smi >/dev/null 2>&1; then
             $DOCKER_CMD rm -f $CONTAINER_NAME
         fi
         
-        # Use TensorFlow's official GPU Jupyter image (pre-configured with CUDA and cuDNN)
+        # Use TensorFlow's official GPU Jupyter image
         echo "Pulling TensorFlow GPU Jupyter image..."
         $DOCKER_CMD pull tensorflow/tensorflow:2.15.0-gpu-jupyter
         
-        # Run with GPU support using TensorFlow's official image
+        # Run with GPU support
         $DOCKER_CMD run --gpus all -d \
             -p $PORT:8888 \
             -v "$(pwd):/tf/notebooks" \

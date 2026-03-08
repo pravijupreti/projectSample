@@ -194,6 +194,7 @@ setup_remote() {
 }
 
 # Function to commit and push changes from HOST
+# Function to commit and push changes from HOST
 commit_and_push() {
     echo -e "${YELLOW}Checking for changes on host...${NC}"
     
@@ -235,6 +236,23 @@ commit_and_push() {
         if git remote | grep -q origin; then
             echo "Pushing to GitHub ($CURRENT_BRANCH) from host..."
             
+            # First, try to pull any remote changes (with rebase)
+            echo "Checking for remote changes..."
+            if git fetch origin "$CURRENT_BRANCH" 2>/dev/null; then
+                # Check if local is behind remote
+                LOCAL=$(git rev-parse HEAD)
+                REMOTE=$(git rev-parse origin/"$CURRENT_BRANCH" 2>/dev/null || echo "")
+                
+                if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
+                    echo "Remote has changes. Pulling and rebasing..."
+                    if git pull --rebase origin "$CURRENT_BRANCH" 2>&1; then
+                        echo -e "${GREEN}✅ Successfully pulled remote changes${NC}"
+                    else
+                        echo -e "${YELLOW}⚠️  Pull failed, but will try push anyway${NC}"
+                    fi
+                fi
+            fi
+            
             # Check if branch exists on remote
             if git ls-remote --heads origin "$CURRENT_BRANCH" | grep -q "$CURRENT_BRANCH"; then
                 echo "Branch '$CURRENT_BRANCH' exists on remote. Pushing to existing branch..."
@@ -245,7 +263,8 @@ commit_and_push() {
                     echo ""
                     echo "Debugging:"
                     echo "  - Make sure you're logged in to GitHub on your host"
-                    echo "  - Try running: git push origin $CURRENT_BRANCH"
+                    echo "  - Try running: git pull origin $CURRENT_BRANCH --rebase"
+                    echo "  - Then try: git push origin $CURRENT_BRANCH"
                 fi
             else
                 echo "Branch '$CURRENT_BRANCH' does not exist on remote. Creating and pushing new branch..."
@@ -253,10 +272,6 @@ commit_and_push() {
                     echo -e "${GREEN}✅ Successfully created and pushed new branch '$CURRENT_BRANCH' to GitHub${NC}"
                 else
                     echo -e "${RED}❌ Failed to push new branch to GitHub${NC}"
-                    echo ""
-                    echo "Debugging:"
-                    echo "  - Make sure you're logged in to GitHub on your host"
-                    echo "  - Try running: git push -u origin $CURRENT_BRANCH"
                 fi
             fi
         else

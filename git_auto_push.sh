@@ -7,6 +7,7 @@ set -e
 CONFIG_FILE="$HOME/.jupyter_git_config"
 DEFAULT_BRANCH="main"
 WORKSPACE_PATH="/tf/notebooks"
+SSH_KEY_PATH="$HOME/.ssh/id_ed25519"
 # ========================================================
 
 # Colors for output
@@ -44,6 +45,77 @@ echo "Workspace: $WORKSPACE_PATH"
 echo "Trigger: Browser window closed - backing up your work..."
 echo ""
 
+# ==================== SSH KEY MANAGEMENT ====================
+
+# Function to setup SSH key on host
+setup_ssh_key() {
+    echo -e "${YELLOW}🔑 Setting up SSH key for GitHub...${NC}"
+    
+    # Check if SSH key already exists
+    if [ ! -f "$SSH_KEY_PATH" ]; then
+        echo "No SSH key found. Generating one..."
+        
+        # Get email for SSH key
+        read -p "Enter your GitHub email address: " github_email
+        
+        # Generate SSH key
+        ssh-keygen -t ed25519 -C "$github_email" -f "$SSH_KEY_PATH" -N ""
+        
+        echo -e "${GREEN}✅ SSH key generated at $SSH_KEY_PATH${NC}"
+    else
+        echo -e "${GREEN}✅ SSH key already exists at $SSH_KEY_PATH${NC}"
+    fi
+    
+    # Start ssh-agent and add key
+    eval "$(ssh-agent -s)" >/dev/null
+    ssh-add "$SSH_KEY_PATH" 2>/dev/null || true
+    
+    # Display public key for GitHub
+    echo ""
+    echo -e "${YELLOW}📋 Your public SSH key (add this to GitHub):${NC}"
+    echo "=================================================================="
+    cat "$SSH_KEY_PATH.pub"
+    echo "=================================================================="
+    echo ""
+    
+    # Ask if user has added the key to GitHub
+    read -p "Have you added this SSH key to GitHub? (y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}Please add the key to GitHub first:${NC}"
+        echo "1. Copy the key above"
+        echo "2. Go to GitHub.com → Settings → SSH and GPG keys"
+        echo "3. Click 'New SSH key', paste the key, and save"
+        echo ""
+        read -p "Press Enter once you've added the key to continue..."
+    fi
+    
+    # Test SSH connection
+    echo "Testing SSH connection to GitHub..."
+    if ssh -T git@github.com -o StrictHostKeyChecking=accept-new 2>&1 | grep -q "successfully authenticated"; then
+        echo -e "${GREEN}✅ SSH authentication successful!${NC}"
+    else
+        echo -e "${RED}❌ SSH authentication failed. Please check your setup.${NC}"
+        exit 1
+    fi
+}
+
+# Function to convert HTTPS remote to SSH
+convert_to_ssh_remote() {
+    local https_url=$1
+    
+    # Extract username and repo from HTTPS URL
+    # https://github.com/username/repo.git -> git@github.com:username/repo.git
+    if [[ "$https_url" =~ https://github.com/(.+)/(.+).git ]]; then
+        local username="${BASH_REMATCH[1]}"
+        local repo="${BASH_REMATCH[2]}"
+        echo "git@github.com:$username/$repo.git"
+    else
+        # Return original if pattern doesn't match
+        echo "$https_url"
+    fi
+}
+
 # ==================== CONFIGURATION MANAGEMENT ====================
 
 # Load saved configuration
@@ -55,12 +127,24 @@ load_config() {
         echo "   Branch: $CURRENT_BRANCH"
         echo ""
     else
-        # First time setup - ask for repo
+        # First time setup - ask for repo and setup SSH
         echo -e "${PURPLE}========================================${NC}"
         echo -e "${CYAN}📊 First Time GitHub Repository Setup${NC}"
         echo -e "${PURPLE}========================================${NC}"
         
-        read -p "Enter GitHub repository URL: " GITHUB_REPO
+        # Setup SSH key first
+        setup_ssh_key
+        
+        # Ask for repository
+        read -p "Enter GitHub repository URL (HTTPS or SSH): " GITHUB_REPO
+        
+        # Convert HTTPS to SSH if needed
+        if [[ "$GITHUB_REPO" == https://github.com/* ]]; then
+            echo "Converting HTTPS URL to SSH format..."
+            GITHUB_REPO=$(convert_to_ssh_remote "$GITHUB_REPO")
+            echo "Using: $GITHUB_REPO"
+        fi
+        
         read -p "Enter branch name (default: $DEFAULT_BRANCH): " new_branch
         CURRENT_BRANCH="${new_branch:-$DEFAULT_BRANCH}"
         
@@ -70,6 +154,7 @@ load_config() {
 # Last updated: $(date)
 GITHUB_REPO="$GITHUB_REPO"
 CURRENT_BRANCH="$CURRENT_BRANCH"
+# SSH key: $SSH_KEY_PATH
 EOF
         echo -e "${GREEN}✅ Configuration saved to $CONFIG_FILE${NC}"
         echo ""
@@ -77,6 +162,27 @@ EOF
 }
 
 # ==================== GIT OPERATIONS ====================
+
+# Function to copy SSH keys into container
+copy_ssh_keys_to_container() {
+    echo "Copying SSH keys to container..."
+    
+    # Create .ssh directory in container
+    $DOCKER_CMD exec $CONTAINER_NAME mkdir -p /root/.ssh
+    
+    # Copy SSH keys from host to container
+    cat "$SSH_KEY_PATH" | $DOCKER_CMD exec -i $CONTAINER_NAME sh -c 'cat > /root/.ssh/id_ed25519'
+    cat "$SSH_KEY_PATH.pub" | $DOCKER_CMD exec -i $CONTAINER_NAME sh -c 'cat > /root/.ssh/id_ed25519.pub'
+    
+    # Set correct permissions
+    $DOCKER_CMD exec $CONTAINER_NAME chmod 600 /root/.ssh/id_ed25519
+    $DOCKER_CMD exec $CONTAINER_NAME chmod 644 /root/.ssh/id_ed25519.pub
+    
+    # Add GitHub to known hosts
+    $DOCKER_CMD exec $CONTAINER_NAME sh -c 'ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null'
+    
+    echo -e "${GREEN}✅ SSH keys copied to container${NC}"
+}
 
 # Function to fix directory ownership
 fix_directory_ownership() {
@@ -92,6 +198,11 @@ init_git() {
         echo "Installing git in container..."
         $DOCKER_CMD exec $CONTAINER_NAME apt-get update
         $DOCKER_CMD exec $CONTAINER_NAME apt-get install -y git
+    fi
+    
+    # Copy SSH keys to container
+    if [ -f "$SSH_KEY_PATH" ]; then
+        copy_ssh_keys_to_container
     fi
     
     # Fix directory ownership
@@ -207,15 +318,13 @@ commit_and_push() {
         if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git remote | grep -q origin; then
             echo "Pushing to GitHub ($CURRENT_BRANCH)..."
             
-            # Try to push
+            # Try to push (SSH should work automatically now)
             if $DOCKER_CMD exec -w $WORKSPACE_PATH $CONTAINER_NAME git push -u origin "$CURRENT_BRANCH" 2>/dev/null; then
                 echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
             else
                 echo -e "${RED}❌ Failed to push to GitHub${NC}"
-                echo "You may need to set up authentication:"
-                echo "  Run: $DOCKER_CMD exec -it $CONTAINER_NAME bash"
-                echo "  Then run: git config --global credential.helper store"
-                echo "  Then push manually: git push origin $CURRENT_BRANCH"
+                echo "Testing SSH connection..."
+                $DOCKER_CMD exec $CONTAINER_NAME ssh -T git@github.com -o StrictHostKeyChecking=accept-new || true
             fi
         else
             echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"

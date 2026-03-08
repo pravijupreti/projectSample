@@ -1,3 +1,4 @@
+git rm --cached *.sh
 .ipynb_checkpoints/
 */.ipynb_checkpoints/*
 __pycache__/

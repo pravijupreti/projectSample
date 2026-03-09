@@ -211,20 +211,6 @@ EOF
             echo -e "${GREEN}✅ Switched to branch: $CURRENT_BRANCH${NC}"
         fi
     fi
-    
-    # Check if the configured branch exists locally
-    if ! git show-ref --verify --quiet "refs/heads/$CURRENT_BRANCH"; then
-        echo "Local branch '$CURRENT_BRANCH' does not exist. Creating it..."
-        git checkout -b "$CURRENT_BRANCH" 2>/dev/null || git branch "$CURRENT_BRANCH"
-        echo -e "${GREEN}✅ Created local branch: $CURRENT_BRANCH${NC}"
-    fi
-    
-    # Ensure we're on the correct branch
-    current_local_branch=$(git rev-parse --abbrev-ref HEAD)
-    if [ "$current_local_branch" != "$CURRENT_BRANCH" ]; then
-        echo "Switching to branch: $CURRENT_BRANCH"
-        git checkout "$CURRENT_BRANCH" 2>/dev/null || true
-    fi
 }
 
 # Function to setup remote on host
@@ -244,10 +230,18 @@ setup_remote() {
     fi
 }
 
-# Function to commit and push changes from HOST
-# Function to commit and push changes from HOST
+# Function to commit and push changes from HOST with detailed logging
 commit_and_push() {
     echo -e "${YELLOW}Checking for changes on host...${NC}"
+    
+    # Show current git state for debugging
+    echo -e "\n${CYAN}=== CURRENT GIT STATE ===${NC}"
+    echo "Current directory: $(pwd)"
+    echo "Current branch: $(git branch --show-current 2>/dev/null || echo 'detached')"
+    echo "Remote URL: $(git remote get-url origin 2>/dev/null || echo 'No remote')"
+    echo "Git status:"
+    git status --short || echo "  No changes"
+    echo -e "${CYAN}=========================${NC}\n"
     
     # First, handle detached HEAD state by switching to existing branch if possible
     CURRENT_BRANCH_NAME=$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")
@@ -305,54 +299,10 @@ commit_and_push() {
         
         # Create commit with timestamp
         commit_msg="Auto-commit: Notebook work saved on $(date '+%Y-%m-%d %H:%M:%S')"
-<<<<<<< Updated upstream
-        git commit -m "$commit_msg"
-        echo -e "${GREEN}✅ Changes committed on host${NC}"
-        
-        # Push if remote is configured
-        if git remote | grep -q origin; then
-            echo "Pushing to GitHub ($CURRENT_BRANCH) from host..."
-            
-            # First, try to pull any remote changes (with rebase)
-            echo "Checking for remote changes..."
-            if git fetch origin "$CURRENT_BRANCH" 2>/dev/null; then
-                # Check if local is behind remote
-                LOCAL=$(git rev-parse HEAD)
-                REMOTE=$(git rev-parse origin/"$CURRENT_BRANCH" 2>/dev/null || echo "")
-                
-                if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
-                    echo "Remote has changes. Pulling and rebasing..."
-                    if git pull --rebase origin "$CURRENT_BRANCH" 2>&1; then
-                        echo -e "${GREEN}✅ Successfully pulled remote changes${NC}"
-                    else
-                        echo -e "${YELLOW}⚠️  Pull failed, but will try push anyway${NC}"
-                    fi
-                fi
-            fi
-            
-            # Check if branch exists on remote
-            if git ls-remote --heads origin "$CURRENT_BRANCH" | grep -q "$CURRENT_BRANCH"; then
-                echo "Branch '$CURRENT_BRANCH' exists on remote. Pushing to existing branch..."
-                if git push origin "$CURRENT_BRANCH" 2>&1; then
-                    echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
-                else
-                    echo -e "${RED}❌ Failed to push to GitHub${NC}"
-                    echo ""
-                    echo "Debugging:"
-                    echo "  - Make sure you're logged in to GitHub on your host"
-                    echo "  - Try running: git pull origin $CURRENT_BRANCH --rebase"
-                    echo "  - Then try: git push origin $CURRENT_BRANCH"
-                fi
-            else
-                echo "Branch '$CURRENT_BRANCH' does not exist on remote. Creating and pushing new branch..."
-                if git push -u origin "$CURRENT_BRANCH" 2>&1; then
-                    echo -e "${GREEN}✅ Successfully created and pushed new branch '$CURRENT_BRANCH' to GitHub${NC}"
-                else
-                    echo -e "${RED}❌ Failed to push new branch to GitHub${NC}"
-                fi
-=======
         if git commit -m "$commit_msg"; then
             echo -e "${GREEN}✅ Changes committed on host${NC}"
+            echo "  Commit hash: $(git rev-parse HEAD)"
+            echo "  Commit message: $commit_msg"
         else
             echo -e "${YELLOW}⚠️  No changes to commit${NC}"
         fi
@@ -360,6 +310,7 @@ commit_and_push() {
     
     # Always try to push (even if no new commits, there might be unpushed ones)
     if git remote | grep -q origin; then
+        echo -e "\n${CYAN}=== PUSH OPERATION ===${NC}"
         echo "Pushing to GitHub ($CURRENT_BRANCH) from host..."
         
         # Ensure we're on the correct branch
@@ -369,64 +320,127 @@ commit_and_push() {
             echo -e "${RED}❌ Still in detached HEAD. This should not happen.${NC}"
             # Try to checkout existing branch
             if git show-ref --verify --quiet "refs/heads/$CURRENT_BRANCH"; then
+                echo "Checking out existing branch: $CURRENT_BRANCH"
                 git checkout "$CURRENT_BRANCH"
             else
+                echo "Creating new branch: $CURRENT_BRANCH"
                 git checkout -b "$CURRENT_BRANCH"
->>>>>>> Stashed changes
             fi
         elif [ "$CURRENT_BRANCH_NAME" != "$CURRENT_BRANCH" ]; then
             echo "Switching to branch $CURRENT_BRANCH before push..."
             git checkout "$CURRENT_BRANCH"
         fi
         
+        # Check if there are unpushed commits
+        UNPUSHED_COMMITS=$(git log @{u}.. 2>/dev/null || echo "NO_UPSTREAM")
+        
+        if [ "$UNPUSHED_COMMITS" = "NO_UPSTREAM" ]; then
+            echo "No upstream branch configured. Will set upstream on push."
+        elif [ -z "$UNPUSHED_COMMITS" ]; then
+            echo "No unpushed commits found. Checking if remote is ahead..."
+            
+            # Check if remote has commits we don't have
+            git fetch origin "$CURRENT_BRANCH" 2>/dev/null || true
+            REMOTE_COMMITS=$(git log ..origin/"$CURRENT_BRANCH" 2>/dev/null || echo "")
+            
+            if [ -n "$REMOTE_COMMITS" ]; then
+                echo -e "${YELLOW}⚠️  Remote has commits not in local:${NC}"
+                echo "$REMOTE_COMMITS"
+                echo "You may need to pull first: git pull origin $CURRENT_BRANCH --rebase"
+            fi
+        else
+            echo -e "${GREEN}📤 Unpushed commits:${NC}"
+            echo "$UNPUSHED_COMMITS"
+        fi
+        
         # Check if remote branch exists
-        if git ls-remote --heads origin "$CURRENT_BRANCH" 2>/dev/null | grep -q "$CURRENT_BRANCH"; then
-            # Branch exists, just push
+        REMOTE_BRANCH_EXISTS=$(git ls-remote --heads origin "$CURRENT_BRANCH" 2>/dev/null | grep -q "$CURRENT_BRANCH" && echo "yes" || echo "no")
+        
+        if [ "$REMOTE_BRANCH_EXISTS" = "yes" ]; then
+            echo "Remote branch '$CURRENT_BRANCH' exists."
+            
+            # Check if we need to pull first
+            git fetch origin "$CURRENT_BRANCH" 2>/dev/null || true
+            BEHIND_COMMITS=$(git rev-list --count HEAD..origin/"$CURRENT_BRANCH" 2>/dev/null || echo "0")
+            
+            if [ "$BEHIND_COMMITS" -gt 0 ]; then
+                echo -e "${YELLOW}⚠️  Local branch is behind remote by $BEHIND_COMMITS commits. Pulling first...${NC}"
+                git pull --rebase origin "$CURRENT_BRANCH" || echo "Pull failed, but continuing..."
+            fi
+            
             PUSH_CMD="git push origin $CURRENT_BRANCH"
         else
-            # Branch doesn't exist, set upstream
+            echo "Remote branch '$CURRENT_BRANCH' does not exist. Will create it."
             PUSH_CMD="git push -u origin $CURRENT_BRANCH"
         fi
         
         echo "Running: $PUSH_CMD"
+        echo ""
         
-        # Execute push command
-        if $PUSH_CMD 2>&1; then
-            echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
+        # Execute push command and capture output
+        PUSH_OUTPUT=$($PUSH_CMD 2>&1)
+        PUSH_EXIT_CODE=$?
+        
+        echo "$PUSH_OUTPUT"
+        echo ""
+        
+        if [ $PUSH_EXIT_CODE -eq 0 ]; then
+            echo -e "${GREEN}✅ SUCCESS: Changes pushed to GitHub${NC}"
+            
+            # Verify the push
+            git fetch origin "$CURRENT_BRANCH" 2>/dev/null || true
+            LOCAL_HASH=$(git rev-parse HEAD)
+            REMOTE_HASH=$(git rev-parse origin/"$CURRENT_BRANCH" 2>/dev/null || echo "")
+            
+            if [ "$LOCAL_HASH" = "$REMOTE_HASH" ]; then
+                echo -e "${GREEN}✓ Verified: Local and remote are in sync${NC}"
+            else
+                echo -e "${YELLOW}⚠️  Warning: Local and remote may not be in sync${NC}"
+            fi
         else
-            echo -e "${RED}❌ Failed to push to GitHub${NC}"
+            echo -e "${RED}❌ FAILED: Could not push to GitHub${NC}"
             echo ""
-            echo "Debugging:"
-            echo "  - Current branch: $(git branch --show-current 2>/dev/null || echo 'unknown')"
-            echo "  - Remote URL: $(git remote get-url origin 2>/dev/null || echo 'unknown')"
-            echo "  - Try manually: $PUSH_CMD"
-            echo "  - If remote has changes, try: git pull origin $CURRENT_BRANCH --rebase"
+            echo "Possible issues:"
+            echo "  1. Authentication failed - need to login to GitHub"
+            echo "  2. Remote has changes you need to pull first"
+            echo "  3. Branch protection rules on GitHub"
+            echo ""
+            echo "Try manually:"
+            echo "  git pull origin $CURRENT_BRANCH --rebase"
+            echo "  $PUSH_CMD"
         fi
+        
+        echo -e "${CYAN}=========================${NC}\n"
     else
         echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"
+        echo "To set up remote, run: git remote add origin <repository-url>"
     fi
 }
 
 # Function to show final status
 show_final_status() {
-    echo -e "\n${BLUE}=== Git Status ===${NC}"
+    echo -e "\n${BLUE}=== FINAL GIT STATUS ===${NC}"
+    echo "Current branch: $(git branch --show-current 2>/dev/null || echo 'detached')"
+    echo ""
+    echo "Git status:"
     git status --short 2>/dev/null || echo "No git repo"
     
-    echo -e "\n${BLUE}=== Last Commit ===${NC}"
+    echo ""
+    echo "Last commit:"
     git log --oneline -1 2>/dev/null || echo "No commits yet"
     
-    echo -e "\n${BLUE}=== Remote URL ===${NC}"
+    echo ""
+    echo "Remote URL:"
     git remote -v 2>/dev/null || echo "No remote"
     
-    echo -e "\n${BLUE}=== Current Branch ===${NC}"
-    git branch --show-current 2>/dev/null || echo "No branch"
-    
-    echo -e "\n${BLUE}=== Unpushed Commits ===${NC}"
+    echo ""
+    echo "Unpushed commits:"
     if git status 2>/dev/null | grep -q "Your branch is ahead"; then
         git log @{u}.. 2>/dev/null || echo "No upstream branch"
     else
-        echo "No unpushed commits"
+        echo "None - everything is pushed"
     fi
+    echo -e "${BLUE}=========================${NC}"
 }
 
 # ==================== MAIN EXECUTION ====================
@@ -434,6 +448,8 @@ show_final_status() {
 main() {
     # Go to the workspace directory on host
     cd "$WORKSPACE_PATH"
+    
+    echo -e "${CYAN}Starting git auto-push process...${NC}"
     
     # Fix Git safe.directory issue
     fix_safe_directory "$WORKSPACE_PATH"
@@ -456,7 +472,7 @@ main() {
     # Show final status
     show_final_status
     
-    echo -e "\n${GREEN}✅ Your work has been backed up!${NC}"
+    echo -e "\n${GREEN}✅ Git auto-push process completed!${NC}"
 }
 
 # Run main function

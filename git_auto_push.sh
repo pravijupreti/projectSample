@@ -138,7 +138,7 @@ EOF
 
 # ==================== GIT OPERATIONS ON HOST ====================
 
-# Function to check if git repo exists on host
+# Function to check if git repo exists on host and handle branch state
 check_git_repo() {
     if [ ! -d ".git" ]; then
         echo "Initializing git repository on host..."
@@ -159,6 +159,57 @@ EOF
         git add .
         git commit -m "Initial commit from Jupyter workspace" || true
         echo -e "${GREEN}✅ Git repository initialized on host${NC}"
+        return
+    fi
+    
+    # Check for uncommitted changes first
+    if [ -n "$(git status --porcelain)" ]; then
+        echo -e "${YELLOW}📝 Uncommitted changes detected. Will handle them in commit phase.${NC}"
+        # Don't try to switch branches with uncommitted changes
+        return
+    fi
+    
+    # Check if we're in detached HEAD state (only if no uncommitted changes)
+    if ! git symbolic-ref HEAD >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  Detached HEAD state detected. Fixing...${NC}"
+        
+        # Get the current commit hash
+        CURRENT_COMMIT=$(git rev-parse HEAD)
+        
+        # Check if branch already exists
+        if git show-ref --verify --quiet "refs/heads/$CURRENT_BRANCH"; then
+            echo "Branch '$CURRENT_BRANCH' exists. Switching to it..."
+            git checkout "$CURRENT_BRANCH"
+            
+            # Check if the detached commit is already in the branch
+            if ! git merge-base --is-ancestor "$CURRENT_COMMIT" "$CURRENT_BRANCH" 2>/dev/null; then
+                echo "The detached commit is not in the branch. Cherry-picking..."
+                git cherry-pick "$CURRENT_COMMIT" || echo "Cherry-pick failed, but continuing..."
+            fi
+        else
+            echo "Creating branch '$CURRENT_BRANCH' from detached HEAD..."
+            git branch "$CURRENT_BRANCH" "$CURRENT_COMMIT"
+            git checkout "$CURRENT_BRANCH"
+        fi
+        echo -e "${GREEN}✅ Now on branch: $CURRENT_BRANCH${NC}"
+    else
+        # We're on a branch, get its name
+        CURRENT_BRANCH_NAME=$(git symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
+        echo -e "${GREEN}✅ On branch: $CURRENT_BRANCH_NAME${NC}"
+        
+        # If on a different branch than configured, and no uncommitted changes
+        if [ "$CURRENT_BRANCH_NAME" != "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH_NAME" != "unknown" ]; then
+            echo "Switching to configured branch: $CURRENT_BRANCH"
+            
+            # Check if configured branch exists locally
+            if git show-ref --verify --quiet "refs/heads/$CURRENT_BRANCH"; then
+                git checkout "$CURRENT_BRANCH"
+            else
+                # Create the branch from current HEAD
+                git checkout -b "$CURRENT_BRANCH"
+            fi
+            echo -e "${GREEN}✅ Switched to branch: $CURRENT_BRANCH${NC}"
+        fi
     fi
     
     # Check if the configured branch exists locally
@@ -198,6 +249,31 @@ setup_remote() {
 commit_and_push() {
     echo -e "${YELLOW}Checking for changes on host...${NC}"
     
+    # First, handle detached HEAD state by switching to existing branch if possible
+    CURRENT_BRANCH_NAME=$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")
+    
+    if [ "$CURRENT_BRANCH_NAME" = "detached" ]; then
+        echo -e "${YELLOW}⚠️  In detached HEAD state."
+        
+        # Check if the configured branch already exists
+        if git show-ref --verify --quiet "refs/heads/$CURRENT_BRANCH"; then
+            echo "Branch '$CURRENT_BRANCH' exists. Switching to it..."
+            # Stash any uncommitted changes if needed
+            if [ -n "$(git status --porcelain)" ]; then
+                echo "Stashing uncommitted changes before switching branches..."
+                git stash push -m "auto-stash before branch switch"
+                git checkout "$CURRENT_BRANCH"
+                git stash pop || true
+            else
+                git checkout "$CURRENT_BRANCH"
+            fi
+        else
+            echo "Creating new branch '$CURRENT_BRANCH' from detached HEAD..."
+            git checkout -b "$CURRENT_BRANCH"
+        fi
+        echo -e "${GREEN}✅ Now on branch: $CURRENT_BRANCH${NC}"
+    fi
+    
     # Try git status with retry on lock
     local max_retries=3
     local retry_count=0
@@ -229,6 +305,7 @@ commit_and_push() {
         
         # Create commit with timestamp
         commit_msg="Auto-commit: Notebook work saved on $(date '+%Y-%m-%d %H:%M:%S')"
+<<<<<<< Updated upstream
         git commit -m "$commit_msg"
         echo -e "${GREEN}✅ Changes committed on host${NC}"
         
@@ -273,15 +350,60 @@ commit_and_push() {
                 else
                     echo -e "${RED}❌ Failed to push new branch to GitHub${NC}"
                 fi
-            fi
+=======
+        if git commit -m "$commit_msg"; then
+            echo -e "${GREEN}✅ Changes committed on host${NC}"
         else
-            echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"
+            echo -e "${YELLOW}⚠️  No changes to commit${NC}"
         fi
-    elif [ "$changes" = "LOCK_ERROR" ]; then
-        echo -e "${RED}❌ Git is locked and couldn't be accessed after $max_retries attempts${NC}"
-        echo "Try running manually: rm -f .git/index.lock"
+    fi
+    
+    # Always try to push (even if no new commits, there might be unpushed ones)
+    if git remote | grep -q origin; then
+        echo "Pushing to GitHub ($CURRENT_BRANCH) from host..."
+        
+        # Ensure we're on the correct branch
+        CURRENT_BRANCH_NAME=$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")
+        
+        if [ "$CURRENT_BRANCH_NAME" = "detached" ]; then
+            echo -e "${RED}❌ Still in detached HEAD. This should not happen.${NC}"
+            # Try to checkout existing branch
+            if git show-ref --verify --quiet "refs/heads/$CURRENT_BRANCH"; then
+                git checkout "$CURRENT_BRANCH"
+            else
+                git checkout -b "$CURRENT_BRANCH"
+>>>>>>> Stashed changes
+            fi
+        elif [ "$CURRENT_BRANCH_NAME" != "$CURRENT_BRANCH" ]; then
+            echo "Switching to branch $CURRENT_BRANCH before push..."
+            git checkout "$CURRENT_BRANCH"
+        fi
+        
+        # Check if remote branch exists
+        if git ls-remote --heads origin "$CURRENT_BRANCH" 2>/dev/null | grep -q "$CURRENT_BRANCH"; then
+            # Branch exists, just push
+            PUSH_CMD="git push origin $CURRENT_BRANCH"
+        else
+            # Branch doesn't exist, set upstream
+            PUSH_CMD="git push -u origin $CURRENT_BRANCH"
+        fi
+        
+        echo "Running: $PUSH_CMD"
+        
+        # Execute push command
+        if $PUSH_CMD 2>&1; then
+            echo -e "${GREEN}✅ Successfully pushed to GitHub${NC}"
+        else
+            echo -e "${RED}❌ Failed to push to GitHub${NC}"
+            echo ""
+            echo "Debugging:"
+            echo "  - Current branch: $(git branch --show-current 2>/dev/null || echo 'unknown')"
+            echo "  - Remote URL: $(git remote get-url origin 2>/dev/null || echo 'unknown')"
+            echo "  - Try manually: $PUSH_CMD"
+            echo "  - If remote has changes, try: git pull origin $CURRENT_BRANCH --rebase"
+        fi
     else
-        echo -e "${GREEN}✅ No changes detected since last commit${NC}"
+        echo -e "${YELLOW}⚠️  No remote repository configured. Commit saved locally.${NC}"
     fi
 }
 
@@ -298,6 +420,13 @@ show_final_status() {
     
     echo -e "\n${BLUE}=== Current Branch ===${NC}"
     git branch --show-current 2>/dev/null || echo "No branch"
+    
+    echo -e "\n${BLUE}=== Unpushed Commits ===${NC}"
+    if git status 2>/dev/null | grep -q "Your branch is ahead"; then
+        git log @{u}.. 2>/dev/null || echo "No upstream branch"
+    else
+        echo "No unpushed commits"
+    fi
 }
 
 # ==================== MAIN EXECUTION ====================
@@ -315,7 +444,7 @@ main() {
     # Load or setup configuration
     load_config
     
-    # Check if git repo exists on host, initialize if needed
+    # Check if git repo exists on host and handle branch state
     check_git_repo
     
     # Setup remote on host

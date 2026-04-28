@@ -9,3 +9,5 @@ __pycache__/
 *.tmp
 *.sh
 jupyter_git_config
+# Git config (contains sensitive info)
+.jupyter_git_config

@@ -1,3 +1,10 @@
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+git rm --cached *.sh
+=======
+>>>>>>> 48fafa5 (Auto-commit: 2026-04-28 18:21:51)
+>>>>>>> 468c1ec (Auto-commit: 2026-04-28 18:22:22)
 .ipynb_checkpoints/
 */.ipynb_checkpoints/*
 __pycache__/
@@ -6,3 +13,11 @@ __pycache__/
 .env
 *.log
 *.tmp
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+*.sh
+jupyter_git_config
+=======
+>>>>>>> 48fafa5 (Auto-commit: 2026-04-28 18:21:51)
+>>>>>>> 468c1ec (Auto-commit: 2026-04-28 18:22:22)

@@ -24,7 +24,7 @@ except ImportError:
 class ScriptWorker(QThread):
     """Thread for running shell scripts without blocking UI"""
     output_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(int, str)
+    finished_signal = pyqtSignal(int, str)  # exit code, output
     
     def __init__(self, script_path, args=None, cwd=None):
         super().__init__()
@@ -33,10 +33,12 @@ class ScriptWorker(QThread):
         self.cwd = cwd or os.getcwd()
         
     def run(self):
+        """Run the shell script"""
         try:
-            # Build command - use bash to ensure proper execution
-            cmd = ["bash", self.script_path] + self.args
+            # Build command
+            cmd = [self.script_path] + self.args
             
+            # Run script
             process = subprocess.Popen(
                 cmd,
                 cwd=self.cwd,
@@ -47,6 +49,7 @@ class ScriptWorker(QThread):
                 universal_newlines=True
             )
             
+            # Read output in real-time
             output_lines = []
             for line in iter(process.stdout.readline, ''):
                 if line:
@@ -54,6 +57,8 @@ class ScriptWorker(QThread):
                     self.output_signal.emit(line.strip())
                     
             process.wait()
+            
+            # Send completion signal
             full_output = '\n'.join(output_lines)
             self.finished_signal.emit(process.returncode, full_output)
             
@@ -62,7 +67,7 @@ class ScriptWorker(QThread):
 
 
 class JupyterManager(QMainWindow):
-    """Main UI Window - Calls shell scripts"""
+    """Main UI Window - Only calls shell scripts, no heavy lifting"""
     
     def __init__(self):
         super().__init__()
@@ -90,19 +95,17 @@ class JupyterManager(QMainWindow):
     def setup_scripts(self):
         """Make sure all scripts are executable"""
         scripts = [
-            "git.sh",                    # Main git entry point
-            "git/git.sh",                # Actual git script
+            "git_auto_push.sh",
+            "jupyter_notebook.sh", 
             "launch_jupyter_gpu.sh",
-            "jupyter_notebook.sh"
+            "git_operations.sh",
+            "container_operations.sh"
         ]
         
         for script in scripts:
             script_path = self.script_dir / script
             if script_path.exists():
                 os.chmod(script_path, 0o755)
-                print(f"✅ Made executable: {script}")
-            else:
-                print(f"⚠️  Script not found: {script}")
                 
     def setup_ui(self):
         """Setup the UI"""
@@ -433,7 +436,7 @@ class JupyterManager(QMainWindow):
     # ========== Container Operations ==========
     
     def start_container(self):
-        """Start Jupyter container"""
+        """Start Jupyter container using your script"""
         self.log_output("Starting Jupyter container...")
         self.container_output.clear()
         
@@ -441,7 +444,7 @@ class JupyterManager(QMainWindow):
         os.environ['PORT'] = self.port.text()
         os.environ['CONTAINER_TYPE'] = self.container_type.currentText()
         
-        # Run launch script
+        # Run your launch script
         self.run_script(
             "launch_jupyter_gpu.sh",
             output_widget=self.container_output,
@@ -490,10 +493,10 @@ class JupyterManager(QMainWindow):
     # ========== Git Operations ==========
     
     def git_status(self):
-        """Show git status using git.sh"""
+        """Show git status using your git_auto_push.sh script"""
         self.git_output.clear()
         self.run_script(
-            "git.sh",
+            "git_auto_push.sh",
             ["manual"],
             output_widget=self.git_output
         )
@@ -520,9 +523,9 @@ class JupyterManager(QMainWindow):
             self.run_command(f'git commit -m "{message}"', self.git_output)
             
     def git_push(self):
-        """Push to GitHub using git.sh"""
+        """Push to GitHub"""
         self.git_output.clear()
-        self.run_script("git.sh", ["manual"], output_widget=self.git_output)
+        self.run_script("git_auto_push.sh", ["manual"], output_widget=self.git_output)
         
     def git_pull(self):
         """Pull from GitHub"""
@@ -539,8 +542,7 @@ class JupyterManager(QMainWindow):
     def git_switch_branch(self):
         """Switch branch"""
         # Get branches
-        result = subprocess.run("git branch", shell=True, capture_output=True, text=True,
-                               cwd=self.workspace_path.text())
+        result = subprocess.run("git branch", shell=True, capture_output=True, text=True)
         branches = [b.strip().replace('*', '').strip() for b in result.stdout.split('\n') if b.strip()]
         
         branch, ok = QInputDialog.getItem(self, "Switch Branch", "Branch:", branches, 0, False)
@@ -557,17 +559,10 @@ class JupyterManager(QMainWindow):
             self.run_command("git checkout -- .", self.git_output)
             
     def git_fix_permissions(self):
-        """Fix git permissions using the permissions module"""
+        """Fix git permissions"""
         self.git_output.clear()
-        # Call the permissions fix script
-        permissions_script = self.script_dir / "git/permissions.sh"
-        if permissions_script.exists():
-            self.run_script("git/permissions.sh", output_widget=self.git_output)
-        else:
-            # Fallback to manual commands
-            self.run_command("sudo chown -R $USER:$USER .git 2>/dev/null || true", self.git_output)
-            self.run_command("find .git -type f -exec chmod 644 {} \\; 2>/dev/null || true", self.git_output)
-            self.run_command("find .git -type d -exec chmod 755 {} \\; 2>/dev/null || true", self.git_output)
+        self.run_command("sudo chown -R $USER:$USER .git 2>/dev/null || true", self.git_output)
+        self.run_command("find .git -type f -exec chmod 644 {} \\; 2>/dev/null || true", self.git_output)
         self.log_output("Git permissions fixed")
         
     def run_command(self, command, output_widget):
@@ -593,7 +588,7 @@ class JupyterManager(QMainWindow):
                               shell=True, capture_output=True, text=True)
         
         if result.stdout.strip():
-            if not self.stop_btn.isEnabled():
+            if self.stop_btn.isEnabled() == False:
                 self.container_status.setText("🟢 Running")
                 self.container_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
                 self.start_btn.setEnabled(False)
@@ -610,12 +605,11 @@ class JupyterManager(QMainWindow):
                 self.open_btn.setEnabled(False)
                 
         # Update git info
-        git_dir = os.path.join(self.workspace_path.text(), ".git")
-        if os.path.exists(git_dir):
+        if os.path.exists(os.path.join(self.workspace_path.text(), ".git")):
             result = subprocess.run("git remote get-url origin 2>/dev/null", shell=True,
                                   capture_output=True, text=True, cwd=self.workspace_path.text())
             if result.stdout:
-                self.repo_status.setText(result.stdout.strip()[:50])
+                self.repo_status.setText(result.stdout.strip())
                 
             result = subprocess.run("git branch --show-current", shell=True,
                                   capture_output=True, text=True, cwd=self.workspace_path.text())
@@ -625,14 +619,14 @@ class JupyterManager(QMainWindow):
             result = subprocess.run("git log -1 --oneline", shell=True,
                                   capture_output=True, text=True, cwd=self.workspace_path.text())
             if result.stdout:
-                self.commit_status.setText(result.stdout.strip()[:50])
+                self.commit_status.setText(result.stdout.strip())
                 
         # Update stats
         stats = f"Workspace: {self.workspace_path.text()}\n"
         stats += f"Container: {'Running' if self.stop_btn.isEnabled() else 'Stopped'}\n"
         stats += f"Branch: {self.branch_status.text()}\n"
         
-        result = subprocess.run("git status --porcelain 2>/dev/null | wc -l", shell=True,
+        result = subprocess.run("git status --porcelain | wc -l", shell=True,
                               capture_output=True, text=True, cwd=self.workspace_path.text())
         if result.stdout:
             stats += f"Uncommitted changes: {result.stdout.strip()} files"
@@ -661,27 +655,12 @@ class JupyterManager(QMainWindow):
     def update_scripts_info(self):
         """Update scripts information display"""
         info = "Available Scripts:\n"
-        info += "=" * 40 + "\n\n"
-        
-        # Check main scripts
-        for script in ["git.sh", "launch_jupyter_gpu.sh", "jupyter_notebook.sh"]:
+        for script in ["git_auto_push.sh", "jupyter_notebook.sh", "launch_jupyter_gpu.sh"]:
             path = self.script_dir / script
             if path.exists():
                 info += f"  ✅ {script}\n"
             else:
                 info += f"  ❌ {script}\n"
-                
-        # Check git module
-        git_dir = self.script_dir / "git"
-        if git_dir.exists():
-            info += "\nGit Module Scripts:\n"
-            for script in ["git.sh", "config.sh", "permissions.sh", "git_ops.sh", "utils.sh"]:
-                path = git_dir / script
-                if path.exists():
-                    info += f"  ✅ git/{script}\n"
-                else:
-                    info += f"  ❌ git/{script}\n"
-                    
         self.scripts_info.setText(info)
         
     def load_config(self):
@@ -699,8 +678,8 @@ class JupyterManager(QMainWindow):
                 # Change to workspace
                 if os.path.exists(self.workspace_path.text()):
                     os.chdir(self.workspace_path.text())
-            except Exception as e:
-                print(f"Error loading config: {e}")
+            except:
+                pass
                 
     def save_config(self):
         """Save configuration"""
@@ -711,11 +690,8 @@ class JupyterManager(QMainWindow):
             "auto_commit": self.auto_commit.isChecked(),
             "auto_push": self.auto_push.isChecked()
         }
-        try:
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=2)
-        except Exception as e:
-            print(f"Error saving config: {e}")
+        with open(self.config_file, 'w') as f:
+            json.dump(config, f, indent=2)
             
     def apply_dark_theme(self):
         """Apply dark theme to UI"""
@@ -799,17 +775,15 @@ def main():
     app = QApplication(sys.argv)
     app.setFont(QFont("Arial", 10))
     
-    # Check if scripts directory exists
+    # Check if scripts exist
     script_dir = Path(__file__).parent / "scripts"
     if not script_dir.exists():
         os.makedirs(script_dir)
-        print(f"✅ Created {script_dir}")
-        print("\n⚠️  Please copy your scripts to this directory:")
-        print("  - git.sh (the main entry point)")
-        print("  - git/ (the entire git module folder)")
-        print("  - launch_jupyter_gpu.sh")
+        print(f"Created {script_dir}")
+        print("Please copy your scripts to this directory:")
+        print("  - git_auto_push.sh")
         print("  - jupyter_notebook.sh")
-        print("\nOr run the setup script to create them automatically.")
+        print("  - launch_jupyter_gpu.sh")
         
     window = JupyterManager()
     window.show()

@@ -262,8 +262,7 @@ class JupyterManager(QMainWindow):
             ("⬇️ Pull", self.git_pull),
             ("✨ New Branch", self.git_new_branch),
             ("🔄 Switch Branch", self.git_switch_branch),
-            ("🗑️ Discard", self.git_discard),
-            ("🔧 Fix Permissions", self.git_fix_permissions)
+            ("🗑️ Discard", self.git_discard)
         ]
         
         for i, (text, callback) in enumerate(git_actions):
@@ -558,12 +557,6 @@ class JupyterManager(QMainWindow):
             self.git_output.clear()
             self.run_command("git checkout -- .", self.git_output)
             
-    def git_fix_permissions(self):
-        """Fix git permissions"""
-        self.git_output.clear()
-        self.run_command("sudo chown -R $USER:$USER .git 2>/dev/null || true", self.git_output)
-        self.run_command("find .git -type f -exec chmod 644 {} \\; 2>/dev/null || true", self.git_output)
-        self.log_output("Git permissions fixed")
         
     def run_command(self, command, output_widget):
         """Run a shell command"""
